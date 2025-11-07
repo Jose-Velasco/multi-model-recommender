@@ -1,0 +1,186 @@
+# ============================================
+# Python / General
+# ============================================
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.pyo
+*.egg
+*.egg-info/
+dist/
+build/
+*.manifest
+*.spec
+
+# Virtual environments
+.env
+.venv/
+env/
+venv/
+ENV/
+.ipynb_checkpoints/
+.idea/
+.vscode/
+*.swp
+
+# ============================================
+# Data & Datasets
+# ============================================
+brain_tumor_data/
+data/
+datasets/
+*.nii
+*.nii.gz
+*.mha
+*.h5
+*.csv
+*.zip
+*.tar.gz
+*.jsonl
+!data/README.md        # Keep small metadata docs
+train.txt
+train-1.txt
+train-2.txt
+
+# ============================================
+# Model Artifacts / Outputs
+# ============================================
+*.pt
+*.pth
+*.onnx
+*.engine
+*.plan
+*.ckpt
+*.npz
+*.npy
+*.pickle
+*.pkl
+*.joblib
+models/**/weights/
+training/checkpoints/
+training/logs/
+training/outputs/
+registry/artifacts/
+registry/mlruns/
+mlruns/
+mlartifacts/
+
+# ============================================
+# Ray / MLflow / Monitoring
+# ============================================
+ray_results/
+ray_temp/
+ray_debug/
+logs/
+tmp/
+*.log
+
+# ============================================
+# Docker & Containers
+# ============================================
+docker/*.pid
+docker/*.log
+docker/.env
+*.bak
+*.tar
+*.img
+*.sif
+*.sqsh
+*.container
+
+# ============================================
+# Jupyter / Notebooks
+# ============================================
+*.ipynb_checkpoints
+.notebooks/
+notebooks/.ipynb_checkpoints/
+notebooks/outputs/
+notebooks/__pycache__/
+
+# ============================================
+# OS / Editor
+# ============================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
+*.orig
+*~
+
+# ============================================
+# Configuration secrets
+# ============================================
+.env
+.env.local
+.env.production
+.env.staging
+.env.dev
+*.secret
+*.key
+*.pem
+credentials.json
+config.yaml
+config.yml
+!configs/*.yaml        # keep committed configs
+!configs/*.yml
+
+# ============================================
+# Cache / Temporary
+# ============================================
+.cache/
+__pycache__/
+*.pid
+*.lock
+*.pid.lock
+*.tmp
+*.out
+*.err
+*.bak
+*.old
+*.tmp/
+*.temp/
+tmp/
+logs/
+wandb/
+lightning_logs/
+tensorboard/
+events.out.tfevents.*
+
+# ============================================
+# Test & Reports
+# ============================================
+.coverage
+htmlcov/
+coverage.xml
+.pytest_cache/
+tests/__pycache__/
+tests/reports/
+tests/tmp/
+*.pytest_cache/
+
+# ============================================
+# Ignore user-generated local configs
+# ============================================
+local_config.yaml
+personal_settings.json
+secrets/
+keys/
+certs/
+
+# ============================================
+# Allowlist (keep docs/configs)
+# ============================================
+!README.md
+!requirements.txt
+!docker-compose.yml
+!docker/
+!configs/
+!training/
+!serving/
+!registry/
+!monitoring/
+!workflows/
+!scripts/
+!tests/

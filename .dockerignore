@@ -1,0 +1,140 @@
+# ======================================================
+# Generic build / Python ignores
+# ======================================================
+__pycache__/
+*.py[cod]
+*.so
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+.env/
+env/
+.venv/
+*.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs & temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Cache & package managers
+.cache/
+.pytest_cache/
+.mypy_cache/
+__pycache__/
+coverage/
+.tox/
+*.coverage
+*.prof
+
+# ======================================================
+# Project-specific ignores
+# ======================================================
+
+# Data and medical imaging files (large)
+data/
+datasets/
+*.nii
+*.nii.gz
+*.mha
+*.mhd
+*.nrrd
+*.dcm
+*.tfrecord
+*.csv
+*.jsonl
+train.txt
+train-1.txt
+train-2.txt
+
+# Model artifacts / checkpoints
+checkpoints/
+runs/
+outputs/
+weights/
+artifacts/
+models/
+experiments/
+wandb/
+mlruns/
+
+# Large trained model bundles
+*.pt
+*.pth
+*.onnx
+*.trt
+*.ckpt
+*.h5
+*.tar
+*.tar.gz
+*.zip
+
+# ======================================================
+# Repo-specific directories
+# ======================================================
+
+# MLflow local storage
+registry/mlruns/
+registry/mlflow.db
+
+# Triton model repo (will be mounted via volume instead)
+serving/triton/model_repository/
+
+# Docker & Compose build context exclusions
+docker-compose.override.yml
+Dockerfile.*
+docker/
+.dockerignore
+
+# Ray logs and autoscaler files
+ray_results/
+session_latest/
+session_*/*
+.ray/
+
+# VSCode / IDE metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+*.DS_Store
+Thumbs.db
+
+# Credentials & examples
+*.pem
+*.key
+*.crt
+*.env
+.env.*
+.env.example
+secret_*
+config.json
+token.json
+
+# ======================================================
+# Frontend or web assets (if we add one later)
+# ======================================================
+node_modules/
+frontend/build/
+frontend/dist/
+frontend/.next/
+frontend/.cache/
+brain_tumor_data/
