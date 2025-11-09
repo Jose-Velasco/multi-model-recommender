@@ -2,7 +2,7 @@
 The **first time** building the dev env will take sometime since a lot of the libraries are large. After the first build, the dev env will
 **spin up fast**.
 
-### Dev Environment: Visual Studio code (vscode) & Docker (Recommended) CUDA 12.6
+### Dev Environment: Visual Studio code (vscode) & Docker (Recommended) **CUDA** 12.6
 
 Install `docker` and `docker-compose` and have the **docker application running** before attempting to run commands with `docker`, `docker-compose`, or spinning up a development environment
 
