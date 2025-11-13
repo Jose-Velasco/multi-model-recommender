@@ -20,7 +20,7 @@ RUN pip install --upgrade pip wheel setuptools
 
 # cache pip wheels for requirements
 # COPY requirements.txt /tmp/requirements.txt
-COPY requirements.txt /tmp/
+COPY requirements.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt

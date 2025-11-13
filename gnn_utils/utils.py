@@ -1,6 +1,8 @@
 import torch
-from torch_geometric.utils import to_undirected, degree, is_undirected, contains_self_loops
+from torch_geometric.utils import degree, contains_self_loops
 from networkx import Graph
+from torch_geometric.data import Data
+from typing import Optional
 
 def graph_info(data):
     print(f"Summary")
@@ -81,6 +83,145 @@ def top_degree_subgraph(G: Graph, top_n: int = 1000):
     keeps only the most connected (“important”) nodes
     Preserves the most active users/items or central entities.
     """
-    deg = dict(G.degree())
+    deg = dict(G.degree()) # pyright: ignore[reportCallIssue]
     top_nodes = [n for n,_ in sorted(deg.items(), key=lambda x: x[1], reverse=True)[:top_n]]
     return G.subgraph(top_nodes).copy()
+
+def dict_to_tensor(
+    mapping: dict[int | str, float],
+    num_nodes: int,
+    dtype: torch.dtype = torch.float32,
+    device: Optional[torch.device] = None,
+    default: float = 0.0,
+) -> torch.Tensor:
+    """
+    Convert a node-indexed dictionary (e.g., NetworkX centrality output)
+    into a dense torch tensor aligned by node index [0..num_nodes-1].
+
+    Parameters
+    ----------
+    mapping : dict
+        Dictionary where keys are node indices (int or str convertible to int),
+        and values are scalars (float).
+    num_nodes : int
+        Total number of nodes (tensor length).
+    dtype : torch.dtype, optional
+        Tensor dtype (default: torch.float32).
+    device : torch.device, optional
+        Target device (default: CPU).
+    default : float, optional
+        Default value for missing nodes (default: 0.0).
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape [num_nodes], aligned to node IDs.
+    """
+    t = torch.full((num_nodes,), fill_value=default, dtype=dtype, device=device)
+    for node_id, v in mapping.items():
+        idx = int(node_id)
+        if 0 <= idx < num_nodes:
+            t[idx] = float(v)
+    return t
+
+def add_node_attr(graph: Data, features: torch.Tensor, attr_name: Optional[str] = None) -> Data:
+    """
+    if attr_name provided, adds features as a attribute to  the graph object with key=attr_name
+    else
+    
+    concatenates the features to the node features So each node's feature vector just gets extended with the new features.
+    """
+    assert graph.x is not None
+    if attr_name is None:
+        x = graph.x
+        x = torch.concat((x, features), dim=1)
+        graph.x = x
+    else:
+        graph[attr_name] = features
+    return graph
+
+def add_edge_attr(graph: Data, features: torch.Tensor, attr_name: Optional[str] = None) -> Data:
+    """
+    Safely add or concatenate edge-level features to a PyG graph.
+
+    if attr_name provided, adds features as a attribute to the graph object with key=attr_name
+    else
+
+    concatenates the features to the edge features So each edge's feature vector just gets extended with the new features.
+
+    Parameters
+    ----------
+    graph : torch_geometric.data.Data
+        The input graph.
+    features : torch.Tensor
+        Tensor of shape [num_edges, num_new_features].
+    attr_name : str or None, optional
+        - If None: concatenate features to existing graph.edge_attr (create if missing).
+        - If str: add as a new attribute (graph[attr_name] = features).
+    """
+    num_edges = graph.edge_index.size(1) # pyright: ignore[reportOptionalMemberAccess]
+    assert features.size(0) == num_edges, (
+        f"Feature rows ({features.size(0)}) must match number of edges ({num_edges})."
+    )
+
+    # Match dtype/device with existing edge_attr (if any)
+    if graph.edge_attr is not None:
+        features = features.to(graph.edge_attr.device, dtype=graph.edge_attr.dtype)
+
+    if attr_name is None:
+        if graph.edge_attr is None:
+            graph.edge_attr = features
+        else:
+            graph.edge_attr = torch.cat([graph.edge_attr, features], dim=1)
+    else:
+        graph[attr_name] = features
+    return graph
+
+def normalize_zscore(x: torch.Tensor, dim: int = 0, eps: float = 1e-12) -> torch.Tensor:
+    mean = x.mean(dim=dim, keepdim=True)
+    std = x.std(dim=dim, keepdim=True)
+    # guard against zero std (constant feature)
+    # if any feature column (or row) in x has zero variance (i.e. every value is identical),
+    # then std == 0
+    # chooses element-wise between a and b
+    # It checks each entry of std:
+    # If std[i] < eps (≈ 0, constant feature), replace it with 1.0.
+    # Else, keep the computed std.
+    std = torch.where(std < eps, torch.ones_like(std), std)
+    return (x - mean) / (std + eps)
+
+def log1p_standardize(x, dim=0, eps=1e-12) -> torch.Tensor:
+    x = torch.clamp(x, min=0)
+    x = torch.log1p(x)
+    return normalize_zscore(x, dim=dim, eps=eps)
+
+def drop_zero_columns(tensor: torch.Tensor, verbose: bool = True) -> torch.Tensor:
+    """
+    Removes columns from a 2D tensor that are entirely zero (sum == 0).
+
+    Args:
+        tensor (torch.Tensor): Input tensor of shape [N, D].
+        verbose (bool): If True, prints how many columns were kept/dropped.
+
+    Returns:
+        torch.Tensor: Tensor with only non-zero columns retained.
+    """
+    if tensor.ndim != 2:
+        raise ValueError(f"Expected 2D tensor, got shape {tuple(tensor.shape)}")
+
+    # Mask columns whose absolute-sum > 0
+    mask = tensor.abs().sum(dim=0) > 0
+
+    if not mask.any():
+        if verbose:
+            print("[drop_zero_columns] All columns are zero. Returning original tensor.")
+        return tensor
+
+    filtered = tensor[:, mask]
+
+    if verbose:
+        dropped = (~mask).sum().item()
+        kept = mask.sum().item()
+        print(f"[drop_zero_columns] Kept {kept} / {mask.numel()} columns; dropped {dropped}.")
+
+    return filtered
