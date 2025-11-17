@@ -25,6 +25,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt
 
+# pip install pyg-lib -f https://data.pyg.org/whl/torch-2.8.0+cu126.html
+
 # Application setup
 COPY . /app/app
 

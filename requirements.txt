@@ -13,6 +13,7 @@ tqdm
 ipywidgets==8.1.8
 tabulate==0.9.0
 networkx==3.5
+# pyg-lib==0.5.0+pt28cu126
 # nx-cugraph-cu12 --extra-index-url https://pypi.nvidia.com
 # torch-scatter
 # torch-sparse

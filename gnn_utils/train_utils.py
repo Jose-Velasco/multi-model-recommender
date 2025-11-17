@@ -17,341 +17,7 @@ from torchmetrics.retrieval import (
 from collections import defaultdict
 from torch import device as TorchDevice
 
-def graph_info(data):
-    print(f"Summary")
-    print("-" * 40)
-
-    # --- Node & edge basics ---
-    print(f"Nodes: {data.num_nodes}")
-    print(f"Edges: {data.num_edges} "
-          f"({'undirected' if data.is_undirected() else 'directed'})")
-
-    # --- Feature info ---
-    if getattr(data, "x", None) is not None:
-        print(f"Node features: {data.x.shape[1]} dims")
-    else:
-        print("Node features: None")
-
-    if getattr(data, "edge_attr", None) is not None:
-        print(f"Edge features: {data.edge_attr.shape[1]} dims")
-
-    if getattr(data, "y", None) is not None:
-        print(f"Labels: {data.y.shape} | dtype={data.y.dtype}")
-
-    # --- Self-loops, duplicates, isolated nodes ---
-    print(f"Self-loops: {contains_self_loops(data.edge_index)}")
-    if data.num_nodes < 1e6:  # avoid big tensors
-        deg = degree(data.edge_index[0], num_nodes=data.num_nodes)
-        isolated = (deg == 0).sum().item()
-        print(f"Isolated nodes: {isolated} / {data.num_nodes}")
-        print(f"Mean degree: {deg.mean():.2f} | "
-              f"Max degree: {deg.max().item() if deg.numel() else 0}")
-
-    # --- Density ---
-    possible_edges = data.num_nodes * (data.num_nodes - 1)
-    density = data.num_edges / possible_edges if possible_edges else 0
-    print(f"Density: {density:.6f}")
-
-    # --- Data types & device ---
-    print(f"Data device: {data.edge_index.device}")
-    print(f"Data types: x={data.x.dtype if getattr(data, 'x', None) is not None else None}, "
-          f"edge_index={data.edge_index.dtype}")
-
-    # --- Memory footprint estimate ---
-    total_bytes = 0
-    for k, v in data.items():
-        if torch.is_tensor(v):
-            total_bytes += v.numel() * v.element_size()
-    print(f"Approx. tensor memory: {total_bytes / 1e6:.2f} MB")
-
-    # --- Check for unbalanced labels (classification) ---
-    if getattr(data, "y", None) is not None and data.y.ndim == 1:
-        num_classes = int(data.y.max()) + 1 if data.y.numel() else 0
-        class_counts = torch.bincount(data.y).tolist()
-        print(f"Classes: {num_classes} | Label distribution: {class_counts}")
-
-    print("-" * 40)
-
-def get_item_user_node_id_inv_map(graph) -> tuple[dict[int, int], dict[int, int]]:
-    """
-    Gets mapping from node_id as key to its original entity_id as value
-
-    ex. user_node_id_inv_map has key of node_id that returns the associated user_id
-    """
-    user_node_id_inv_map = {v: k for k, v in graph.users_node_id_map.items()} # pyright: ignore[reportAttributeAccessIssue]
-    item_node_id_inv_map = {v: k for k, v in graph.item_node_id_map.items()} # pyright: ignore[reportAttributeAccessIssue]
-    return user_node_id_inv_map, item_node_id_inv_map
-
-def generate_node_labels(graph: Graph, user_node_id_inv_map: dict[int, int], item_node_id_inv_map: dict[int, int]) -> dict[int, str]:
-    # Label nodes so networkx can assign a node the type of node (User | Item) + their user/item_id (not node_id)
-    labels: dict[int, str] = {}
-    for node_id in graph.nodes():
-        if node_id in user_node_id_inv_map:
-            labels[node_id] = f"U{user_node_id_inv_map[node_id]}"
-        elif node_id in item_node_id_inv_map:
-            labels[node_id] = f"I{item_node_id_inv_map[node_id]}"
-        else:
-            labels[node_id] = str(node_id)
-    return labels
-
-def top_degree_subgraph(G: Graph, top_n: int = 1000):
-    """
-    sampling strategy used to extract the most connected (high-degree) nodes 
-    from a large graph so that its small enough to visualize or analyze clearly.
-    keeps only the most connected (“important”) nodes
-    Preserves the most active users/items or central entities.
-    """
-    deg = dict(G.degree()) # pyright: ignore[reportCallIssue]
-    top_nodes = [n for n,_ in sorted(deg.items(), key=lambda x: x[1], reverse=True)[:top_n]]
-    return G.subgraph(top_nodes).copy()
-
-def dict_to_tensor(
-    mapping: dict[int | str, float],
-    num_nodes: int,
-    dtype: torch.dtype = torch.float32,
-    device: Optional[torch.device] = None,
-    default: float = 0.0,
-) -> torch.Tensor:
-    """
-    Convert a node-indexed dictionary (e.g., NetworkX centrality output)
-    into a dense torch tensor aligned by node index [0..num_nodes-1].
-
-    Parameters
-    ----------
-    mapping : dict
-        Dictionary where keys are node indices (int or str convertible to int),
-        and values are scalars (float).
-    num_nodes : int
-        Total number of nodes (tensor length).
-    dtype : torch.dtype, optional
-        Tensor dtype (default: torch.float32).
-    device : torch.device, optional
-        Target device (default: CPU).
-    default : float, optional
-        Default value for missing nodes (default: 0.0).
-
-    Returns
-    -------
-    torch.Tensor
-        Tensor of shape [num_nodes], aligned to node IDs.
-    """
-    t = torch.full((num_nodes,), fill_value=default, dtype=dtype, device=device)
-    for node_id, v in mapping.items():
-        idx = int(node_id)
-        if 0 <= idx < num_nodes:
-            t[idx] = float(v)
-    return t
-
-def add_node_attr(graph: Data, features: torch.Tensor, attr_name: Optional[str] = None) -> Data:
-    """
-    if attr_name provided, adds features as a attribute to  the graph object with key=attr_name
-    else
-    
-    concatenates the features to the node features So each node's feature vector just gets extended with the new features.
-    """
-    assert graph.x is not None
-    if attr_name is None:
-        x = graph.x
-        x = torch.concat((x, features), dim=1)
-        graph.x = x
-    else:
-        graph[attr_name] = features
-    return graph
-
-def add_edge_attr(graph: Data, features: torch.Tensor, attr_name: Optional[str] = None) -> Data:
-    """
-    Safely add or concatenate edge-level features to a PyG graph.
-
-    if attr_name provided, adds features as a attribute to the graph object with key=attr_name
-    else
-
-    concatenates the features to the edge features So each edge's feature vector just gets extended with the new features.
-
-    Parameters
-    ----------
-    graph : torch_geometric.data.Data
-        The input graph.
-    features : torch.Tensor
-        Tensor of shape [num_edges, num_new_features].
-    attr_name : str or None, optional
-        - If None: concatenate features to existing graph.edge_attr (create if missing).
-        - If str: add as a new attribute (graph[attr_name] = features).
-    """
-    num_edges = graph.edge_index.size(1) # pyright: ignore[reportOptionalMemberAccess]
-    assert features.size(0) == num_edges, (
-        f"Feature rows ({features.size(0)}) must match number of edges ({num_edges})."
-    )
-
-    # Match dtype/device with existing edge_attr (if any)
-    if graph.edge_attr is not None:
-        features = features.to(graph.edge_attr.device, dtype=graph.edge_attr.dtype)
-
-    if attr_name is None:
-        if graph.edge_attr is None:
-            graph.edge_attr = features
-        else:
-            graph.edge_attr = torch.cat([graph.edge_attr, features], dim=1)
-    else:
-        graph[attr_name] = features
-    return graph
-
-def normalize_zscore(x: torch.Tensor, dim: int = 0, eps: float = 1e-12) -> torch.Tensor:
-    mean = x.mean(dim=dim, keepdim=True)
-    std = x.std(dim=dim, keepdim=True)
-    # guard against zero std (constant feature)
-    # if any feature column (or row) in x has zero variance (i.e. every value is identical),
-    # then std == 0
-    # chooses element-wise between a and b
-    # It checks each entry of std:
-    # If std[i] < eps (≈ 0, constant feature), replace it with 1.0.
-    # Else, keep the computed std.
-    std = torch.where(std < eps, torch.ones_like(std), std)
-    return (x - mean) / (std + eps)
-
-def log1p_standardize(x, dim=0, eps=1e-12) -> torch.Tensor:
-    x = torch.clamp(x, min=0)
-    x = torch.log1p(x)
-    return normalize_zscore(x, dim=dim, eps=eps)
-
-def drop_zero_columns(tensor: torch.Tensor, verbose: bool = True) -> torch.Tensor:
-    """
-    Removes columns from a 2D tensor that are entirely zero (sum == 0).
-
-    Args:
-        tensor (torch.Tensor): Input tensor of shape [N, D].
-        verbose (bool): If True, prints how many columns were kept/dropped.
-
-    Returns:
-        torch.Tensor: Tensor with only non-zero columns retained.
-    """
-    if tensor.ndim != 2:
-        raise ValueError(f"Expected 2D tensor, got shape {tuple(tensor.shape)}")
-
-    # Mask columns whose absolute-sum > 0
-    mask = tensor.abs().sum(dim=0) > 0
-
-    if not mask.any():
-        if verbose:
-            print("[drop_zero_columns] All columns are zero. Returning original tensor.")
-        return tensor
-
-    filtered = tensor[:, mask]
-
-    if verbose:
-        dropped = (~mask).sum().item()
-        kept = mask.sum().item()
-        print(f"[drop_zero_columns] Kept {kept} / {mask.numel()} columns; dropped {dropped}.")
-
-    return filtered
-
-def metrics_tracker_factory(top_k: int, aggregation: Literal['mean', 'median', 'min', 'max']) -> MetricCollection:
-    metricCollection = MetricCollection([
-        RetrievalRecall(top_k=top_k, aggregation=aggregation),
-        RetrievalPrecision(top_k=top_k, aggregation=aggregation),
-        RetrievalMAP(top_k=top_k, aggregation=aggregation),
-        RetrievalNormalizedDCG(top_k=top_k, aggregation=aggregation),
-
-    ])
-
-    return metricCollection
-
-# [1] Chatgpt was used to implement EarlyStopper for stopping training early if validation start increasing to much.
-class EarlyStopper:
-    def __init__(self, patience=5, min_delta=0.0, mode="min", restore_best=True):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.mode = mode
-        self.restore_best = restore_best
-        self.best = math.inf if mode == "min" else -math.inf
-        self.counter = 0
-        self.best_state = None
-        self.should_stop = False
-
-    def step(self, metric, model=None):
-        improved = metric < (self.best - self.min_delta) if self.mode=="min" else metric > (self.best + self.min_delta)
-        if improved:
-            self.best = metric
-            self.counter = 0
-            if model and self.restore_best:
-                self.best_state = copy.deepcopy(model.state_dict())
-        else:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.should_stop = True
-
-    def load_best(self, model):
-        if self.restore_best and self.best_state:
-            model.load_state_dict(self.best_state)
-
-def add_edges_to_dict(data: Data, user_seen_items: defaultdict):
-    """
-    user_seen_items: key should be the user's node id and value is the set of items the
-    user has interacted with
-    """
-    users = data.edge_label_index[0].tolist()
-    items = data.edge_label_index[1].tolist()
-    for u, i in zip(users, items):
-        user_seen_items[u].add(i)
-
-def get_save_allowed_items_per_user(
-        save_allowed_items_per_user_file_path: str,
-        train_data: Data,
-        val_data: Data,
-        test_data: Data,
-        item_node_id_map: dict[int, int]):
-    """
-    if allowed items per user is saved loads it else builds it and saves it to avoid
-    having to rebuild it every time.
-    """
-    print(Path(save_allowed_items_per_user_file_path).exists())
-    if Path(save_allowed_items_per_user_file_path).exists():
-        print(f"Loading found saved allowed dict per user")
-        allowed_items_per_user = torch.load(save_allowed_items_per_user_file_path)
-    else:
-        print(f"Rebuilding: did not find precomputed saved allowed dict at {save_allowed_items_per_user_file_path}")
-        user_seen_items: defaultdict[int, set[int]] = defaultdict(set)
-        add_edges_to_dict(train_data, user_seen_items=user_seen_items)
-        add_edges_to_dict(val_data, user_seen_items=user_seen_items)
-        add_edges_to_dict(test_data, user_seen_items=user_seen_items)
-        all_items: set[int] = set(item_node_id_map.values())
-        allowed_items_per_user = build_allowed_items_per_user(
-            all_items=all_items,
-            user_seen_items=user_seen_items,
-        )
-        torch.save(allowed_items_per_user, save_allowed_items_per_user_file_path)
-    return allowed_items_per_user
-
-def build_allowed_items_per_user(
-    all_items: set[int],
-    user_seen_items: defaultdict[int, set[int]],
-) -> dict[int, torch.Tensor]:
-    """
-    Precompute, for each user (global node ID), the list of items (global IDs)
-    that are valid negatives (= all_items minus items they've interacted with).
-
-    This is done ONCE before training/eval to avoid having to do this
-    every batch during validation
-    """
-    allowed_items_per_user: dict[int, torch.Tensor] = {}
-
-    all_items_list = list(all_items)
-    all_items_set = set(all_items_list)
-
-    for u, seen in user_seen_items.items():
-        # seen is a set of item_global_ids
-        # allowed = all items the user has NOT interacted with
-        allowed = list(all_items_set - seen)
-        if not allowed:
-            # user has seen everything; just fall back
-            # to all items so we can still sample something
-            allowed = all_items_list
-
-        allowed_items_per_user[u] = torch.tensor(
-            allowed, dtype=torch.long
-        )  # stays on CPU, which is fine
-
-    return allowed_items_per_user
-
+from gnn_utils.utils import EarlyStopper
 
 def build_ranking_candidates_with_allowed_per_user(
     batch,
@@ -503,51 +169,6 @@ def build_ranking_candidates_with_allowed_per_user(
 
     return cand_items_local, targets, user_local_for_cands, user_global_for_cands
 
-def build_bpr_from_candidate_scores(
-    scores: torch.Tensor,
-    batch: Data,
-) -> tuple[torch.Tensor, torch.Tensor, int, int]:
-    """
-    Given flat candidate scores of shape [B * (1 + K)] produced from
-    build_ranking_candidates(), reconstruct BPR-style positive and negative
-    score tensors.
-
-    Assumes:
-      - For each user u, scores are ordered as:
-            [pos_item_score, neg1, neg2, ..., negK]
-      - batch.edge_label_index[0] has length B (one positive per user).
-
-    Returns:
-        pos_scores_expanded: Tensor [B*K], positive scores tiled K times
-        neg_scores_flat:     Tensor [B*K], negative scores
-        B:                   number of users in this batch
-        K:                   number of negatives per user
-    """
-    # Number of users in this batch (one positive edge per user)
-    B = batch.edge_label_index.shape[1]
-
-    N = scores.numel()
-    # N = B * (1 + K)  →  K = N/B - 1
-    K = N // B - 1
-
-    scores_2d = scores.view(B, 1 + K)  # [B, 1+K]
-
-    pos_scores = scores_2d[:, 0]       # [B]
-    neg_scores = scores_2d[:, 1:]      # [B, K]
-
-    # Flatten negatives [B*K]
-    neg_scores_flat = neg_scores.reshape(-1)
-
-    # Expand positives [B] → [B*K]
-    pos_scores_expanded = (
-        pos_scores
-        .unsqueeze(1)                 # [B, 1]
-        .expand(-1, K)                # [B, K]
-        .reshape(-1)                  # [B*K]
-    )
-
-    return pos_scores_expanded, neg_scores_flat, B, K
-
 def build_bpr_batch(
     model,
     batch:Data,
@@ -624,6 +245,51 @@ def build_bpr_batch(
     neg_scores = model.classifier(z_users_expanded, z_neg)  # [B*K]
 
     return pos_scores_expanded, neg_scores, node_embedding_parameters, B, K
+
+def build_bpr_from_candidate_scores(
+    scores: torch.Tensor,
+    batch: Data,
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    """
+    Given flat candidate scores of shape [B * (1 + K)] produced from
+    build_ranking_candidates(), reconstruct BPR-style positive and negative
+    score tensors.
+
+    Assumes:
+      - For each user u, scores are ordered as:
+            [pos_item_score, neg1, neg2, ..., negK]
+      - batch.edge_label_index[0] has length B (one positive per user).
+
+    Returns:
+        pos_scores_expanded: Tensor [B*K], positive scores tiled K times
+        neg_scores_flat:     Tensor [B*K], negative scores
+        B:                   number of users in this batch
+        K:                   number of negatives per user
+    """
+    # Number of users in this batch (one positive edge per user)
+    B = batch.edge_label_index.shape[1]
+
+    N = scores.numel()
+    # N = B * (1 + K)  →  K = N/B - 1
+    K = N // B - 1
+
+    scores_2d = scores.view(B, 1 + K)  # [B, 1+K]
+
+    pos_scores = scores_2d[:, 0]       # [B]
+    neg_scores = scores_2d[:, 1:]      # [B, K]
+
+    # Flatten negatives [B*K]
+    neg_scores_flat = neg_scores.reshape(-1)
+
+    # Expand positives [B] → [B*K]
+    pos_scores_expanded = (
+        pos_scores
+        .unsqueeze(1)                 # [B, 1]
+        .expand(-1, K)                # [B, K]
+        .reshape(-1)                  # [B*K]
+    )
+
+    return pos_scores_expanded, neg_scores_flat, B, K
 
 def train_step(model: torch.nn.Module,
               dataloader: torch.utils.data.DataLoader,
@@ -741,11 +407,6 @@ def test_step(model: torch.nn.Module,
           loss_fn: torch.nn.Module,
           device: torch.device,
           non_blocking: bool,
-          eval_negative_sampler: Callable[..., torch.Tensor],
-          all_items: set[int],
-          user_seen_items: dict[int, set[int]],
-          num_neg_eval: int,
-          allowed_items_per_user: dict[int, torch.Tensor],
           metricsTrackers: MetricCollection) -> float:
     """Tests a PyTorch model for a single epoch.
 
@@ -768,12 +429,16 @@ def test_step(model: torch.nn.Module,
     test_loss: float =  0.0
     # total_samples: int = 0
     num_batches: int = 0
-    fallback_stats: dict = {}
+    # fallback_stats: dict = {}
 
     # Loop through DataLoader batches
     for batch in tqdm(dataloader):
         # Send data to target device
         batch = batch.to(device, non_blocking=non_blocking)
+        cand_items_local      = batch.cand_items_local      # [N]
+        targets               = batch.targets               # [N]
+        user_local_for_cands  = batch.user_local_for_cands  # [N]
+        user_global_for_cands = batch.user_global_for_cands # [N]
 
         # candidate_items, targets, indexes, K = build_ranking_candidates(
         #     batch,
@@ -793,17 +458,17 @@ def test_step(model: torch.nn.Module,
         #     all_items=all_items,
         #     user_seen_items=user_seen_items,
         # )
-        (
-            cand_items_local,
-            targets,
-            user_local_for_cands,
-            user_global_for_cands,
-        ) = build_ranking_candidates_with_allowed_per_user(
-            batch=batch,
-            num_neg_eval=num_neg_eval,
-            allowed_items_per_user=allowed_items_per_user,
-            allow_batch_fallback= True
-        )
+        # (
+        #     cand_items_local,
+        #     targets,
+        #     user_local_for_cands,
+        #     user_global_for_cands,
+        # ) = build_ranking_candidates_with_allowed_per_user(
+        #     batch=batch,
+        #     num_neg_eval=num_neg_eval,
+        #     allowed_items_per_user=allowed_items_per_user,
+        #     allow_batch_fallback= True
+        # )
 
         # Edge case: nothing to evaluate in this batch
         if cand_items_local.numel() == 0:
@@ -863,8 +528,6 @@ def test_step(model: torch.nn.Module,
             targets,
             user_global_for_cands,
         )
-        if fallback_stats["num_users_with_fallback"] > 0:
-            print(fallback_stats)
 
     # Adjust metrics to get average loss and accuracy per batch
     # test_loss = test_loss / total_samples
@@ -882,11 +545,6 @@ def train(model: torch.nn.Module,
           epochs: int,
           device: torch.device,
           non_blocking: bool,
-          eval_negative_sampler: Callable,
-          all_items: set[int],
-          user_seen_items: dict[int, set[int]],
-          num_neg_eval: int,
-          allowed_items_per_user: dict[int, torch.Tensor],
           metricsTrackers: MetricCollection) -> dict[str, list]:
     """
     Args:
@@ -944,12 +602,7 @@ def train(model: torch.nn.Module,
             loss_fn=loss_fn,
             device=device,
             non_blocking=non_blocking,
-            eval_negative_sampler=eval_negative_sampler,
             metricsTrackers=metricsTrackers,
-            all_items=all_items,
-            allowed_items_per_user=allowed_items_per_user,
-            user_seen_items=user_seen_items,
-            num_neg_eval=num_neg_eval
         )
 
         epoch_additional_metrics_res = metricsTrackers.compute()

@@ -4,6 +4,8 @@ from torch import Tensor
 from torch_geometric.data import Data
 from torch_geometric.transforms import BaseTransform, AddRandomWalkPE, AddLaplacianEigenvectorPE
 from torch_geometric.utils import to_networkx, degree
+
+from gnn_utils.train_utils import build_ranking_candidates_with_allowed_per_user
 from .utils import add_node_attr, add_edge_attr, dict_to_tensor, drop_zero_columns
 import networkx as nx
 import numpy as np
@@ -493,4 +495,126 @@ class AddLaplacianEigenvectorRelativeDistance(BaseTransform):
         if self.normalize:
            edge_lp = self.normalize(edge_lp)
         add_edge_attr(data, features=edge_lp, attr_name=self.attr_name)
+        return data
+
+
+
+
+class KeepUserToItemSupervisionEdges(BaseTransform):
+    r"""
+    A PyG transform that **filters supervision edges** (``edge_label_index``)
+    so that only **user → item** edges remain.
+
+    This is important for recommendation link prediction using BPR or
+    triplet-style negative sampling, where the supervision edges must
+    represent directed interactions from users to items:
+
+        src_index = user ids  
+        dst_pos_index = positive item ids  
+        dst_neg_index = negative item ids  
+
+    By default, when applying :class:`torch_geometric.transforms.RandomLinkSplit`
+    on an **undirected** bipartite graph, the resulting ``edge_label_index``
+    may contain *both* directions (user→item and item→user).  
+    This transform removes all item→user edges while keeping the
+    message-passing graph (`edge_index`) unchanged.
+
+    Expected fields in ``data``:
+        • ``data.users_node_id_map`` : dict of user to user node IDs  
+        • ``data.item_node_id_map``  : dict of item to item node IDs  
+        • ``data.edge_label_index``  : shape [2, E] supervision edges  
+
+    Args:
+        None
+
+    Returns:
+        The input :class:`~torch_geometric.data.Data` object with
+        ``edge_label_index`` (and ``edge_label`` if present)
+        filtered to contain only user→item edges.
+    """
+    def __init__(self, 
+                 attach_node_type_vector: bool,
+                 num_nodes: int,
+                 item_node_ids: list[int],
+                 users_type: int = 0,
+                 item_type: int = 1
+                 ) -> None:
+        self.attach_node_type_vector = attach_node_type_vector
+        self.num_nodes = num_nodes
+        self.item_node_ids = item_node_ids
+        self.users_type = users_type
+        self.item_type = item_type
+
+    def forward(self, data: Data):
+        # 1. Build node_type vector marking each node as user or item
+
+        # num_users = len(data.users_node_id_map)
+        # num_items = len(data.item_node_id_map)
+        node_type = torch.zeros(self.num_nodes + 1, dtype=torch.long)
+        
+        # # Mark item node IDs (users remain 0)
+        # node_type[[item_node_id for item_node_id in self.item_node_id_map.values()]] = self.item_type
+        node_type[self.item_node_ids] = self.item_type
+
+        # 2. Filter edge_label_index to keep only user→item edges
+        # edge_label_index: [2, E_supervision]
+        src, dst = data.edge_label_index
+
+        # keep only edges where src is user node and dst is item node
+        mask = (node_type[src] == self.users_type) & (node_type[dst] == self.item_type)
+
+        data.edge_label_index = data.edge_label_index[:, mask]
+
+        # If ever using edge_label, filter it too:
+        if hasattr(data, "edge_label"):
+            data.edge_label = data.edge_label[mask]
+        
+        if self.attach_node_type_vector:
+            # Attach for debugging or later use
+            data.node_type = node_type
+        return data
+
+class BuildRankingCandidatesTransform(BaseTransform):
+    """
+    A transform for evaluation that precomputes ranking candidates per batch.
+
+    For each supervision edge (user -> pos_item) in `data.edge_label_index`:
+      - builds 1 positive + `num_neg_eval` negative candidate items
+      - attaches:
+          data.cand_items_local      : [N] local item node indices
+          data.targets               : [N] 1 (pos) / 0 (neg)
+          data.user_local_for_cands  : [N] local user node indices
+          data.user_global_for_cands : [N] global user node ids
+
+    This runs inside the LinkNeighborLoader pipeline (in workers if num_workers>0),
+    so the evaluation loop doesn't have to do Python loops to construct candidates.
+    """
+    def __init__(self, allowed_items_per_user: dict[int, torch.Tensor],
+                 num_neg_eval: int,
+                 item_type: int = 1,
+                 allow_batch_fallback: bool = True):
+        self.allowed_items_per_user = allowed_items_per_user
+        self.num_neg_eval = num_neg_eval
+        self.item_type = item_type
+        self.allow_batch_fallback = allow_batch_fallback
+
+    def forward(self, data: Data) -> Data:
+        (
+            cand_items_local,
+            targets,
+            user_local_for_cands,
+            user_global_for_cands,
+        ) = build_ranking_candidates_with_allowed_per_user(
+            batch=data,
+            num_neg_eval=self.num_neg_eval,
+            allowed_items_per_user=self.allowed_items_per_user,
+            item_type=self.item_type,
+            allow_batch_fallback=self.allow_batch_fallback,
+        )
+
+        # Attach to batch so test_step doesn't have to recompute it
+        data.cand_items_local      = cand_items_local
+        data.targets               = targets
+        data.user_local_for_cands  = user_local_for_cands
+        data.user_global_for_cands = user_global_for_cands
         return data

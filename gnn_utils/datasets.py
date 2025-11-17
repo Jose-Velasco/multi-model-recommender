@@ -70,6 +70,8 @@ class PositiveIterationGraph(InMemoryDataset):
             edge_index=edges
         )
         if self.add_user_item_node_mapping:
+            # data.users_node_id_map  : dict[user_idx -> node_id]
+            # data.item_node_id_map   : dict[item_idx -> node_id]
             graph.users_node_id_map = users_ids
             graph.item_node_id_map = item_ids
 
