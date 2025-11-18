@@ -1,21 +1,10 @@
-from pathlib import Path
 import torch
-from torch_geometric.utils import degree, contains_self_loops
-from networkx import Graph
 from torch_geometric.data import Data
-from typing import Hashable, Literal, Optional, Callable
+from typing import Optional
 from tqdm.auto import tqdm
 from torchmetrics import MetricCollection
-import math, copy
 from torch.optim.lr_scheduler import LRScheduler, ReduceLROnPlateau
-from torchmetrics.retrieval import (
-    RetrievalRecall,
-    RetrievalPrecision,
-    RetrievalMAP,
-    RetrievalNormalizedDCG,
-)
-from collections import defaultdict
-from torch import device as TorchDevice
+
 
 from gnn_utils.utils import EarlyStopper
 
