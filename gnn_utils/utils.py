@@ -13,6 +13,8 @@ from torchmetrics.retrieval import (
     RetrievalNormalizedDCG,
 )
 from collections import defaultdict
+from dateutil import tz
+import datetime
 
 def graph_info(data):
     print(f"Summary")
@@ -51,8 +53,16 @@ def graph_info(data):
 
     # --- Data types & device ---
     print(f"Data device: {data.edge_index.device}")
-    print(f"Data types: x={data.x.dtype if getattr(data, 'x', None) is not None else None}, "
-          f"edge_index={data.edge_index.dtype}")
+    print(f"Data types:")
+    for k in data.keys():
+        if torch.is_tensor(data[k]):
+            print(f"    {k}={data[k].dtype}, shape={data[k].shape}")
+        else:
+            print(f"    {k}={type(data[k])}, len={len(data[k])}")
+        # if getattr(data, k, None):
+
+    # print(f"Data types: x={data.x.dtype if getattr(data, 'x', None) is not None else None}, "
+        #   f"edge_index={data.edge_index.dtype}")
 
     # --- Memory footprint estimate ---
     total_bytes = 0
@@ -251,6 +261,13 @@ def metrics_tracker_factory(top_k: int, aggregation: Literal['mean', 'median', '
     ])
 
     return metricCollection
+def generate_now_timestamp_str(time_zone_info: datetime.tzinfo | None = tz.gettz('America/Los_Angeles')) -> str:
+    # get the current time and set it up into a readable string for the file paths
+    current_time = datetime.datetime.now(time_zone_info)
+    date_string = f"{current_time.year}-{current_time.month}-{current_time.day}"
+    time_string = f"{current_time.hour}-{current_time.minute}-{current_time.second}"
+    date_time_path_str = date_string + "_" + time_string
+    return date_time_path_str
 
 # [1] Chatgpt was used to implement EarlyStopper for stopping training early if validation start increasing to much.
 class EarlyStopper:
@@ -280,39 +297,92 @@ class EarlyStopper:
         if self.restore_best and self.best_state:
             model.load_state_dict(self.best_state)
 
-def add_edges_to_dict(data: Data, user_seen_items: defaultdict):
+# def add_edges_to_dict(data: Data, user_seen_items: defaultdict[int, set[int]]):
+#     """
+#     user_seen_items: key should be the user's node id and value is the set of items the
+#     user has interacted with
+#     """
+#     users = data.edge_label_index[0].tolist()
+#     items = data.edge_label_index[1].tolist()
+#     for u, i in zip(users, items):
+#         user_seen_items[int(u)].add(i)
+
+def aggregate_items_user_has_interacted_with(src_nodes: torch.Tensor, dst_nodes: torch.Tensor, user_node_id_unique: set) ->defaultdict[int, set[int]]:
     """
     user_seen_items: key should be the user's node id and value is the set of items the
     user has interacted with
     """
-    users = data.edge_label_index[0].tolist()
-    items = data.edge_label_index[1].tolist()
-    for u, i in zip(users, items):
-        user_seen_items[u].add(i)
+    user_seen_items: defaultdict[int, set[int]] = defaultdict(set)
+    for edge_idx, src_node in enumerate(src_nodes):
+        if src_node.item() in user_node_id_unique:
+            item_dst_node = int(dst_nodes[edge_idx])
+            # means this user has interacted with this item node
+            user_seen_items[int(src_node)].add(item_dst_node)
+    return user_seen_items
+
+# def get_save_allowed_items_per_user(
+#         save_allowed_items_per_user_file_path: str,
+#         train_data: Data,
+#         val_data: Data,
+#         test_data: Data,
+#         item_node_id_map: dict[int, int]):
+#     """
+#     if allowed items per user is saved loads it else builds it and saves it to avoid
+#     having to rebuild it every time.
+#     """
+#     if Path(save_allowed_items_per_user_file_path).exists():
+#         print(f"Loading found saved allowed dict per user")
+#         allowed_items_per_user = torch.load(save_allowed_items_per_user_file_path)
+#     else:
+#         print(f"Rebuilding: did not find precomputed saved allowed dict at {save_allowed_items_per_user_file_path}")
+#         user_seen_items: defaultdict[int, set[int]] = defaultdict(set)
+#         add_edges_to_dict(train_data, user_seen_items=user_seen_items)
+#         add_edges_to_dict(val_data, user_seen_items=user_seen_items)
+#         add_edges_to_dict(test_data, user_seen_items=user_seen_items)
+#         all_items: set[int] = set(item_node_id_map.values())
+#         allowed_items_per_user = build_allowed_items_per_user(
+#             all_items=all_items,
+#             user_seen_items=user_seen_items,
+#         )
+#         torch.save(allowed_items_per_user, save_allowed_items_per_user_file_path)
+#     return allowed_items_per_user
 
 def get_save_allowed_items_per_user(
         save_allowed_items_per_user_file_path: str,
-        train_data: Data,
-        val_data: Data,
-        test_data: Data,
+        graph: Data,
+        user_to_node_id_map: dict[int, int],
         item_node_id_map: dict[int, int]):
     """
     if allowed items per user is saved loads it else builds it and saves it to avoid
     having to rebuild it every time.
+
+    Assumes bipartite graph of user and items nodes
     """
-    print(Path(save_allowed_items_per_user_file_path).exists())
     if Path(save_allowed_items_per_user_file_path).exists():
         print(f"Loading found saved allowed dict per user")
         allowed_items_per_user = torch.load(save_allowed_items_per_user_file_path)
     else:
         print(f"Rebuilding: did not find precomputed saved allowed dict at {save_allowed_items_per_user_file_path}")
-        user_seen_items: defaultdict[int, set[int]] = defaultdict(set)
-        add_edges_to_dict(train_data, user_seen_items=user_seen_items)
-        add_edges_to_dict(val_data, user_seen_items=user_seen_items)
-        add_edges_to_dict(test_data, user_seen_items=user_seen_items)
-        all_items: set[int] = set(item_node_id_map.values())
+        assert graph.edge_index is not None, f"Error: graph did not have .edge_index attribute required but has {graph}"
+        user_seen_items: defaultdict[int, set[int]] = aggregate_items_user_has_interacted_with(
+            src_nodes=graph.edge_index[0],
+            dst_nodes=graph.edge_index[1],
+            user_node_id_unique=set(user_to_node_id_map.values())
+        )
+        
+        # user_node_id_unique = set(user_to_node_id_map.values())
+        # # user_node_id = torch.tensor(list(user_to_node_id_map.values()))
+        # item_node_id_unique = set(item_node_id_map.values())
+
+        # for col, src_node in enumerate(graph.edge_index[0].tolist()):
+        #     if src_node in user_node_id_unique:
+        #         item_dst_node = int(graph.edge_index[1])
+        #         # means this user has interacted with this item node
+        #         user_seen_items[src_node].add(item_dst_node)
+
+        all_items_unique: set[int] = set(item_node_id_map.values())
         allowed_items_per_user = build_allowed_items_per_user(
-            all_items=all_items,
+            all_items=all_items_unique,
             user_seen_items=user_seen_items,
         )
         torch.save(allowed_items_per_user, save_allowed_items_per_user_file_path)
@@ -345,6 +415,7 @@ def build_allowed_items_per_user(
 
         allowed_items_per_user[u] = torch.tensor(
             allowed, dtype=torch.long
+            # allowed, dtype=torch.int32 # trying to save disk space but needs to be casted back on loading
         )  # stays on CPU, which is fine
 
     return allowed_items_per_user

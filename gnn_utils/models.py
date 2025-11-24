@@ -16,6 +16,7 @@ from torch.nn import (
     Sequential,
     Dropout
 )
+from collections import defaultdict
 
 class EdgeMLPClassifier(torch.nn.Module):
     def __init__(self, input_channels: int, hidden_channels: int, dropout=0.3):
@@ -41,7 +42,7 @@ class GPS(torch.nn.Module):
                  num_layers: int,
                  attn_type: str, attn_kwargs: Dict[str, Any], attentions_heads: int,
                  mpnn: list[MessagePassing], classifier: torch.nn.Module,
-                 num_of_nodes: int, dropout_prob: float, act_func: str):
+                 num_of_nodes: int, num_initial_node_features: int, dropout_prob: float, act_func: str):
         super().__init__()
 
         # tuple first element is pe key and second element is the associated pe's dim
@@ -61,9 +62,9 @@ class GPS(torch.nn.Module):
             )
             total_pe_dims_size += pe_dim
 
-        assert (channels - total_pe_dims_size) > 1, "Need at least 1 learned node embeddings after removing pe features dim"
+        assert (channels - (total_pe_dims_size + num_initial_node_features)) > 1, "Need at least 1 learned node embeddings after removing pe features dim"
 
-        self.node_emb = Embedding(num_of_nodes, channels - total_pe_dims_size)
+        self.node_emb = Embedding(num_of_nodes, channels - (total_pe_dims_size + num_initial_node_features))
 
         self.convs = ModuleList()
         for layer_index in range(num_layers):
@@ -79,10 +80,11 @@ class GPS(torch.nn.Module):
             redraw_interval=1000 if attn_type == 'performer' else None)
 
     # def forward(self, x, pe: torch.Tensor, edge_index, edge_attr, batch):
+    # TODO: incorporate existing node features
     def forward(self, x, edge_index, edge_attr, batch: Data):
         all_pe =  self._process_all_positional_encodings(batch)
         # only gets the node embeddings for nodes in the current batch and concat their pe embeddings 
-        x = torch.cat((self.node_emb(batch.n_id), all_pe), 1)
+        x = torch.cat((x, self.node_emb(batch.n_id), all_pe), 1)
 
         for conv in self.convs:
             x = conv(x, edge_index, edge_attr=edge_attr)
@@ -113,7 +115,59 @@ class GPS(torch.nn.Module):
         """
         emb = self.node_emb.weight
         return emb if node_id is None else emb[node_id]
-         
+
+    # def batch_recommend
+    @torch.inference_mode()
+    def recommend(self, x, edge_index, edge_attr, pe: torch.Tensor, src_index: int, dst_index: torch.Tensor, k: int, sorted: bool = True):
+        # x must be in order global node id [0, 1, 2, ..., n] as a nodes respective embeddings will be concatenated 
+        x = torch.cat([x, self.node_emb.weight, pe], dim=1)
+        for conv in self.convs:
+            x = conv(x, edge_index, edge_attr=edge_attr)
+            x = F.dropout(x, self.dropout_prob, training=self.training)
+        
+        # final gnn output embeddings
+        out_src = x[src_index]
+        out_src = out_src.expand((len(dst_index), out_src.shape[1]))
+        print(f"{out_src.shape}")
+        print(f"{dst_index.size()}")
+
+        out_dst = x[dst_index]
+
+        pred: torch.Tensor = self.classifier(out_src, out_dst)
+        top_index = pred.topk(k, dim=-1, sorted=sorted).indices
+        top_index = dst_index[top_index.view(-1)].view(*top_index.size())
+        
+        return top_index
+    
+    @torch.inference_mode()
+    # def recommend_all(self, x, edge_index, edge_attr, pe: torch.Tensor, src_index: list[int], dst_index: torch.Tensor, k: int, sorted: bool = True) -> defaultdict[int, list[int]]:
+    def recommend_all(self, x, edge_index, edge_attr, pe: torch.Tensor, src_index: list[int], allowed_items_per_user: dict[int, torch.Tensor], k: int, sorted: bool = True) -> defaultdict[int, list[int]]:
+        # x = torch.cat([self.node_emb.weight, pe], dim=1)
+        x = torch.cat([x, self.node_emb.weight, pe], dim=1)
+        for conv in self.convs:
+            x = conv(x, edge_index, edge_attr=edge_attr)
+            x = F.dropout(x, self.dropout_prob, training=self.training)
+        
+        # x must be in order global node id [0, 1, 2, ..., n] as a nodes respective embeddings will be concatenated 
+        recommendations: defaultdict[int, list[int]] = defaultdict(list)
+        for user_id in src_index:
+            out_src = x[user_id] # shape = [128] = feature dim
+            # one user node for each item node and have them have the same feature dim
+            # out_src = out_src.expand((len(dst_index), len(out_src)))
+            current_user_all_uninteracted_items = allowed_items_per_user[user_id].to(x.device)
+            out_src = out_src.expand((len(current_user_all_uninteracted_items), len(out_src)))
+
+            # all item node embeddings subsetted based on the items to consider: dst_index
+            # out_dst = x[dst_index]
+            out_dst = x[current_user_all_uninteracted_items]
+
+            pred: torch.Tensor = self.classifier(out_src, out_dst)
+            top_index = pred.topk(k, dim=-1, sorted=sorted).indices
+            # top_index = dst_index[top_index.view(-1)].view(*top_index.size())
+            top_index = current_user_all_uninteracted_items[top_index.view(-1)].view(*top_index.size())
+            recommendations[user_id] = top_index.tolist()
+        
+        return recommendations
 
 # code from:
 # https://github.com/pyg-team/pytorch_geometric/blob/master/examples/graph_gps.py

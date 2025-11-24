@@ -582,10 +582,10 @@ def train(model: torch.nn.Module,
             device=device,
             non_blocking=non_blocking
         )
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        # torch.cuda.empty_cache()
+        # torch.cuda.synchronize()
 
-        print(f"starting train_step")
+        print(f"starting test_step")
         test_loss = test_step(model=model,
             dataloader=test_dataloader,
             loss_fn=loss_fn,
@@ -594,6 +594,7 @@ def train(model: torch.nn.Module,
             metricsTrackers=metricsTrackers,
         )
 
+        print(f"Calculating metics.")
         epoch_additional_metrics_res = metricsTrackers.compute()
         metricsTrackers.reset()
         # Print out what's happening

@@ -4,7 +4,7 @@ from torch_geometric.data import Data
 from gnn_utils.train_utils import train
 from gnn_utils.utils import (
     metrics_tracker_factory, normalize_zscore, log1p_standardize, graph_info,
-    EarlyStopper, get_save_allowed_items_per_user
+    EarlyStopper, get_save_allowed_items_per_user, drop_zero_columns
 )
 
 from torch_geometric.transforms import Compose, AddRandomWalkPE, AddLaplacianEigenvectorPE, RandomLinkSplit
@@ -29,35 +29,31 @@ from gnn_utils.transforms import (
 from gnn_utils.models import GPS, EdgeMLPClassifier
 from collections import defaultdict
 from functools import partial
+from pathlib import Path
 
-# from torch_geometric.metrics import (
-#     LinkPredMAP,
-#     LinkPredMetricCollection,
-#     LinkPredPrecision,
-#     LinkPredRecall,
-# )
 # %%
 ROOT_DATA_DIR = "./data"
 GRAPH_DATA_DIR = f"{ROOT_DATA_DIR}/graph_data"
 SAVE_ALLOWED_ITEMS_PER_USER = f"{GRAPH_DATA_DIR}/allowed_items_per_user.pt"
+SAVE_MODEL_PATH = f"{GRAPH_DATA_DIR}/best_model_checkpoint.pt"
 RNG_SEED = 101
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# 30% of edges for supervision and 70% are edges for message passing if set to 0.3
+# 40% of edges for supervision and 70% are edges for message passing if set to 0.3
 NUM_VAL = 0.1
 NUM_TEST = 0.1
 DISJOINT_TRAIN_RATIO = 0.4
 NEGATIVE_SAMPLE_RATIO = 3
 EVALUATION_NUM_NEGATIVE = 50
-NUM_NEIGHBORS = [5, 5, 5]
-NUM_WORKERS = 8
+NUM_NEIGHBORS = [2, 2, 2]
+NUM_WORKERS = 6
 # (PIN_MEMORY, NON_BLOCKING) should increase training performance with GPU as long as dataset fits in memory(ram memory)
 PIN_MEMORY = True
 NON_BLOCKING = True
 
-NUM_EPOCHS: int = 3
+NUM_EPOCHS: int = 2
 # BATCH_SIZE: int = 1024
-TRAIN_BATCH_SIZE: int = 256
+TRAIN_BATCH_SIZE: int = 128
 EVALUATION_BATCH_SIZE: int = 512
 OPTIMIZER_LEARNING_RATE: float = 0.001
 WEIGHT_DECAY: float = 0.01
@@ -69,7 +65,7 @@ DROPOUT: float = 0.4
 # PE_OUT_DIM = 16
 ATTN_KWARGS = {'dropout': DROPOUT}
 ATTENTIONS_HEADS = 4
-GINE_MLP_CHANNEL_LIST = [GNN_HIDDEN_CHANNELS, 3 * GNN_HIDDEN_CHANNELS, GNN_HIDDEN_CHANNELS]
+GINE_MLP_CHANNEL_LIST = [GNN_HIDDEN_CHANNELS, 2 * GNN_HIDDEN_CHANNELS, GNN_HIDDEN_CHANNELS]
 
 TOP_K = 20
 METRIC_AGGREGATION = "mean"
@@ -107,10 +103,23 @@ dataset = PositiveIterationGraph(
     bipartite_pre_transform=bipartite_pre_transform,
 )
 # %%
-graph = dataset[0]
+graph:Data = dataset[0] # pyright: ignore[reportAssignmentType]
 graph_info(graph)
+
+# these are guaranteed to be applied during graph first built but manually checked
+# to let type checking know they are there
+assert graph.x is not None and graph.edge_index is not None and graph.edge_attr is not None
+# %%
+# preprocessing random walk PE to remove first columns since it currently always 0
+# think it because unless a node has a self loop at one hop away the probability of returning back
+# is 0, and in this bipartite graph there are no self loops
+graph.random_walk_pe = drop_zero_columns(graph.random_walk_pe)
+graph.x = graph.x[:, 1:]
+
+# %%
 item_node_id_map: dict[int, int] = graph.item_node_id_map # pyright: ignore[reportAttributeAccessIssue]
 del graph.item_node_id_map # pyright: ignore[reportAttributeAccessIssue]
+print(f"Number of item nodes: {len(item_node_id_map)}")
 
 users_node_id_map: dict[int, int] = graph.users_node_id_map # pyright: ignore[reportAttributeAccessIssue]
 del graph.users_node_id_map # pyright: ignore[reportAttributeAccessIssue]
@@ -127,11 +136,17 @@ train_data, val_data, test_data = cast(tuple[Data, Data, Data], dataset_split_tr
 user_seen_items: defaultdict[int, set[int]] = defaultdict(set)
 all_items: set[int] = set()
 
+# allowed_items_per_user = get_save_allowed_items_per_user(
+#     save_allowed_items_per_user_file_path=SAVE_ALLOWED_ITEMS_PER_USER,
+#     train_data=train_data,
+#     val_data=val_data,
+#     test_data=test_data,
+#     item_node_id_map=item_node_id_map)
+
 allowed_items_per_user = get_save_allowed_items_per_user(
     save_allowed_items_per_user_file_path=SAVE_ALLOWED_ITEMS_PER_USER,
-    train_data=train_data,
-    val_data=val_data,
-    test_data=test_data,
+    graph=graph, # pyright: ignore[reportArgumentType]
+    user_to_node_id_map=users_node_id_map,
     item_node_id_map=item_node_id_map)
 
 train_supervision_edge_keep_transform = KeepUserToItemSupervisionEdges(
@@ -253,17 +268,18 @@ model = GPS(
     mpnn=mess_pass_nn,
     classifier=classifier,
     num_of_nodes=graph.num_nodes, # type: ignore
+    num_initial_node_features=graph.num_node_features,
     dropout_prob=DROPOUT,
     act_func="gelu"
 ).to(DEVICE)
 
 test_batch = next(iter(train_loader)).to(DEVICE)
-summary(
+print(summary(
     model=model,
     x=test_batch.x,
     edge_index=test_batch.edge_index,
     edge_attr=test_batch.edge_attr,
-    batch=test_batch)
+    batch=test_batch))
 # %%
 optimizer = torch.optim.AdamW(model.parameters(), lr=OPTIMIZER_LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 scheduler = ReduceLROnPlateau(
@@ -290,15 +306,50 @@ train(
     non_blocking=NON_BLOCKING,
     metricsTrackers=metrics
 )
+# # %%
+# if Path(SAVE_MODEL_PATH).exists():
+#     overwrite = input(f"Warning: saved mode found at {SAVE_MODEL_PATH} overwrite? (enter Y for yes else enter anything)")
+#     if overwrite == "Y":
+#         print("saving best found model state_dict")
+#         early_stopper.load_best(model=model)
+#         torch.save(model.state_dict(), SAVE_MODEL_PATH)    
+# else:
+#     print("saving best found model state_dict")
+#     early_stopper.load_best(model=model)
+#     torch.save(model.state_dict(), SAVE_MODEL_PATH)
+
 # %%
-test_batch = next(iter(train_loader)).to(DEVICE)
-summary_str = summary(
-    model=model,
-    x=test_batch.x,
-    edge_index=test_batch.edge_index,
-    edge_attr=test_batch.edge_attr,
-    batch=test_batch)
-print(summary_str)
+# ckpt = torch.load(SAVE_MODEL_PATH)
+# model.load_state_dict(ckpt)
+# %%
+# model.recommend(
+#     x=torch.cat([graph.x, graph.laplacian_eigenvector_pe, graph.random_walk_pe], dim=1).to(DEVICE), # type: ignore
+#     edge_index=graph.edge_index.to(DEVICE), # pyright: ignore[reportAttributeAccessIssue]
+#     edge_attr=graph.edge_attr.to(DEVICE), # pyright: ignore[reportAttributeAccessIssue]
+#     pe=model._process_all_positional_encodings(graph.to(DEVICE)),
+#     src_index=torch.tensor([0]),
+#     dst_index=torch.tensor(list(item_node_id_map.values())).to(DEVICE),
+#     k=20,
+#     sorted=True
+# )
+all_recommendations = model.recommend_all(
+    # x=torch.cat([graph.x], dim=1).to(DEVICE), # type: ignore
+    x=graph.x.to(DEVICE), # type: ignore
+    edge_index=graph.edge_index.to(DEVICE), # pyright: ignore[reportAttributeAccessIssue]
+    edge_attr=graph.edge_attr.to(DEVICE), # pyright: ignore[reportAttributeAccessIssue]
+    pe=model._process_all_positional_encodings(graph.to(DEVICE)), # type: ignore
+    src_index=list(users_node_id_map.values()),
+    # dst_index=torch.tensor(list(item_node_id_map.values())).to(DEVICE),
+    allowed_items_per_user=allowed_items_per_user,
+    k=20,
+    sorted=True
+)
+
+# freezing dict to avoid accidental default key initialization when querying recommendations with
+# a non-user key
+all_recommendations.default_factory = None
+# %%
+
 # %%
 # TODO: get test func working with eval_negative_sampler
 #       test training func then test and overall train
