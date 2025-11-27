@@ -313,6 +313,46 @@ def generate_dataset_loaders(graph, allowed_items_per_user: dict[int, torch.Tens
 
     return train_loader, val_loader, test_loader
 
+def report_with_optional_checkpoint(
+    epoch: int,
+    model,
+    optimizer,
+    metrics: dict,
+    checkpoint_interval: int = 5,
+):
+    """
+    Report metrics to Ray Tune and optionally include a checkpoint.
+
+    Args:
+        epoch (int): Current epoch index (0-based).
+        model (nn.Module): The model being trained.
+        optimizer (Optimizer): The optimizer for saving state.
+        metrics (dict): Metrics to report.
+        checkpoint_interval (int): How often to checkpoint (every N epochs).
+    """
+    should_checkpoint = (epoch + 1) % checkpoint_interval == 0
+
+    if should_checkpoint:
+        with tempfile.TemporaryDirectory() as temp_checkpoint_dir:
+            path = os.path.join(temp_checkpoint_dir, "checkpoint.pt")
+
+            # Build checkpoint state
+            state = {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch,
+            }
+
+            torch.save(state, path)
+
+            checkpoint = Checkpoint.from_directory(temp_checkpoint_dir)
+
+            tune.report(metrics=metrics, checkpoint=checkpoint)
+    else:
+        # Fast path: metrics only
+        tune.report(metrics=metrics)
+
+
 def ray_tune_train_gnn(
         config: dict[str, Any],
         train_dataset: Data,
@@ -430,26 +470,34 @@ def ray_tune_train_gnn(
 
         learning_rate_scheduler.step(epoch_additional_metrics_res['RetrievalNormalizedDCG'])
 
+
+        report_with_optional_checkpoint(
+            epoch=epoch,
+            model=model,
+            optimizer=optimizer,
+            metrics=epoch_logs | epoch_additional_metrics_res,
+            checkpoint_interval=5,  # every 5 epochs
+        )
         # Here we save a checkpoint. It is automatically registered with
         # Ray Tune and will potentially be accessed through in ``get_checkpoint()``
         # in future iterations.
         # Note to save a file like checkpoint, you still need to put it under a directory
         # to construct a checkpoint.
-        with tempfile.TemporaryDirectory() as temp_checkpoint_dir:
-            # checkpoint = None
-            path = os.path.join(temp_checkpoint_dir, "checkpoint.pt")
-            # if (epoch + 1) % 5 == 0:
-            # This saves the model to the trial directory
-            torch.save(
-                (model.state_dict(), optimizer.state_dict()), path
-            )
-            checkpoint = Checkpoint.from_directory(temp_checkpoint_dir)
+        # with tempfile.TemporaryDirectory() as temp_checkpoint_dir:
+        #     # checkpoint = None
+        #     path = os.path.join(temp_checkpoint_dir, "checkpoint.pt")
+        #     # if (epoch + 1) % 5 == 0:
+        #     # This saves the model to the trial directory
+        #     torch.save(
+        #         (model.state_dict(), optimizer.state_dict()), path
+        #     )
+        #     checkpoint = Checkpoint.from_directory(temp_checkpoint_dir)
 
-            # Send the current training result back to Tune
-            tune.report(
-                metrics=epoch_logs | epoch_additional_metrics_res,
-                checkpoint=checkpoint
-            )
+        #     # Send the current training result back to Tune
+        #     tune.report(
+        #         metrics=epoch_logs | epoch_additional_metrics_res,
+        #         checkpoint=checkpoint
+        #     )
 
 # @remote(num_gpus=1)
 def test_best_model(
