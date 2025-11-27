@@ -1,12 +1,14 @@
-from dataclasses import dataclass, asdict
+import copy
+from dataclasses import dataclass
 import os
+import random
 from typing import Any, Literal, Optional, Type, cast
 import torch
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.data import Data
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from gnn_utils.transforms import BuildRankingCandidatesTransform, KeepUserToItemSupervisionEdges
-from gnn_utils.utils import EarlyStopper, generate_now_timestamp_str, metrics_tracker_factory
+from gnn_utils.utils import generate_now_timestamp_str, metrics_tracker_factory, normalize_metrics_dict
 from gnn_utils.train_utils import test_step, train_step
 from gnn_utils.models import GPS, EdgeMLPClassifier
 from torch_geometric.nn import GINEConv
@@ -16,12 +18,13 @@ from ray import tune
 from ray.tune.schedulers import ASHAScheduler
 from ray.train import Checkpoint
 import tempfile
-from torch_geometric.transforms import Compose, AddRandomWalkPE, AddLaplacianEigenvectorPE, RandomLinkSplit
+from torch_geometric.transforms import RandomLinkSplit
 from torch_geometric.sampler import NegativeSampling
 from torch_geometric.loader import LinkNeighborLoader
 from torch_geometric.nn.models.lightgcn import BPRLoss
-import mlflow
 from ray.air.integrations.mlflow import MLflowLoggerCallback
+from ray.tune.logger import JsonLoggerCallback, CSVLoggerCallback
+from ray.tune import JupyterNotebookReporter
 
 @dataclass
 class LearningRateSchedulerConfigs:
@@ -82,6 +85,17 @@ class GPSConfig:
     dropout_prob: float
     act_func: str
     training_configs: BaseConfig
+
+def convert_dict_params_to_dataclass(hyper_param_config: dict, model_config_dataclass: Type[GPSConfig]) -> GPSConfig:
+    # Deep copy the hyperparameter configuration to avoid mutation
+    copied_hyper_param_config = copy.deepcopy(hyper_param_config)
+    copied_hyper_param_config["training_configs"]["learning_rate_scheduler_configs"] = LearningRateSchedulerConfigs(**copied_hyper_param_config["training_configs"]["learning_rate_scheduler_configs"])
+    copied_hyper_param_config["training_configs"] = BaseConfig(**copied_hyper_param_config["training_configs"])
+    copied_hyper_param_config["classifier"] = EdgeMLPClassifierConfig(**copied_hyper_param_config["classifier"])
+    copied_hyper_param_config["mpnn"] = GINEConfig(**copied_hyper_param_config["mpnn"])
+    
+    model_config = model_config_dataclass(**copied_hyper_param_config)
+    return model_config
 
 def gps_model_factory(config: GPSConfig, graph: Data, model_class: Type[GPS]):
     classifier = EdgeMLPClassifier(
@@ -314,7 +328,7 @@ def ray_tune_train_gnn(
     #     neg_sampling_ratio=config["neg_sampling_ratio"],
     #     num_neighbors=config["num_neighbors"]
     # )
-    gps_config = GPSConfig(**config)
+    gps_config = convert_dict_params_to_dataclass(config, GPSConfig)
 
     train_loader = get_single_dataset_loader(
         graph=train_dataset,
@@ -383,6 +397,15 @@ def ray_tune_train_gnn(
             non_blocking=gps_config.training_configs.non_blocking
         )
 
+        # during evaluation and inference we do apply reg as its used in training the model
+        # to prevent overfitting. Thus, loss during eval/inference evaluation is on pure ranking scores
+        # with no penalties. The way BPRLoss is implemented if we set .lambda_reg to zero it wont apply
+        # reg. if we do not change it to zero then it will apply reg but we are not providing its .forward
+        # method the user embeddings, thus it crashes, so set it to zero then change it back so its applied
+        # during training when we do provide it the user embeddings
+        save_train_lambda: float = criterion.lambda_reg
+        criterion.lambda_reg = 0.0
+
         test_loss = test_step(
             model=model,
             dataloader=val_loader,
@@ -391,9 +414,12 @@ def ray_tune_train_gnn(
             non_blocking=gps_config.training_configs.non_blocking,
             metricsTrackers=metrics_tracker,
         )
+        criterion.lambda_reg = save_train_lambda
 
-        epoch_additional_metrics_res = metrics_tracker.compute()
+        raw_epoch_metrics = metrics_tracker.compute()
         metrics_tracker.reset()
+
+        epoch_additional_metrics_res = normalize_metrics_dict(raw_epoch_metrics)
 
         epoch_logs: dict = {
             "epoch": epoch,
@@ -433,8 +459,8 @@ def test_best_model(
         item_node_ids: list[int],
         allowed_items_per_user: dict[int, torch.Tensor],
         model_class: Type[GPS] = GPS,):
-    device = torch.device("cpu")
-    gps_config: GPSConfig = GPSConfig(**best_result.config)
+    gps_config: GPSConfig = convert_dict_params_to_dataclass(best_result.config, GPSConfig)
+    device = gps_config.training_configs.device
 
     best_trained_model = gps_model_factory(
         config=gps_config,
@@ -446,7 +472,9 @@ def test_best_model(
 
     checkpoint_path = os.path.join(best_result.checkpoint.to_directory(), "checkpoint.pt")
 
-    model_state = torch.load(checkpoint_path, map_location=device)
+    # model_state = torch.load(checkpoint_path, map_location=device)
+    model_state, optimizer_state = torch.load(checkpoint_path, map_location=device)
+    del optimizer_state
     best_trained_model.load_state_dict(model_state)
 
     # train_loader, val_loader, test_loader = generate_dataset_loaders(
@@ -457,6 +485,14 @@ def test_best_model(
     # )
 
     criterion = BPRLoss(gps_config.training_configs.BPR_loss_lambda)
+
+    # during evaluation and inference we do apply reg as its used in training the model
+    # to prevent overfitting. Thus, loss during eval/inference evaluation is on pure ranking scores
+    # with no penalties. The way BPRLoss is implemented if we set .lambda_reg to zero it wont apply
+    # reg. if we do not change it to zero then it will apply reg but we are not providing its .forward
+    # method the user embeddings, thus it crashes, so set it to zero then change it back so its applied
+    # during training when we do provide it the user embeddings
+    criterion.lambda_reg = 0.0
 
     metrics_tracker = metrics_tracker_factory(
         top_k=gps_config.training_configs.metrics_top_k,
@@ -481,7 +517,7 @@ def test_best_model(
         model=best_trained_model,
         dataloader=test_loader,
         loss_fn=criterion,
-        device=device,
+        device=device, # pyright: ignore[reportArgumentType]
         non_blocking=gps_config.training_configs.non_blocking,
         metricsTrackers=metrics_tracker
     )
@@ -500,33 +536,16 @@ def hyper_param_search_driver(config: dict[str, Any], graph: Data,
                              max_num_epochs: int = 5, cpu_per_trial: int = 2, gpus_per_trial: float = 0.2,
                              grace_period: int = 1, reduction_factor: int = 2, metric: str = "RetrievalNormalizedDCG", metric_mode: str = "max",
                              mlflow_tracking_uri: str = "http://localhost:8080", scope: Literal["all", "last", "avg", "last-5-avg", "last-10-avg"] = "avg") -> dict[str, Any]:
-    CONFIG = {
-        "max_num_epochs": max_num_epochs,
-        "device": torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        "num_workers": 2,
-
-        "gnn_hidden_channels": tune.choice([16, 32, 64, 128]),
-        "mlp_hidden_channels": tune.choice([16, 32, 64, 128]),
-        "neg_sampling_ratio": tune.randint(lower=1, upper=5),
-        "num_attention_heads": tune.randint(lower=1, upper=5),
-        "concatenate_gat_gnn_heads_output": tune.choice([True, False]),
-        # only 3 hops since we only using 2 GATConv layers (thus only 2 message passings happen)
-        "num_hops": 2,
-        "num_neighbors": tune.choice([tune.sample_from(lambda config: [tune.qrandint(lower=5, upper=20,q=1).sample() for num_nodes_to_sample in range(config["num_hops"])])]),
-
-        "batch_size": tune.choice([128, 256, 512]),
-        "dropout": tune.uniform(0.10, 0.5),
-        "optimizer_learning_rate": tune.loguniform(1e-4, 1e-1),
-        "weight_decay": tune.loguniform(1e-4, 1e-1),
-    }
-
-    # Set the experiment, or create a new one if does not exist yet.
-    # mlflow.set_tracking_uri(mlflow_tracking_uri)
-    # mlflow.set_experiment(experiment_name="setup_mlflow_example")
-    # with mlflow.start_run(experiment_id=experiment.experiment_id):
-    # with mlflow.start_run(experiment_id=experiment_id, run_name=f"fold{fold}"):
-    # mlflow.set_tracking_uri("http://localhost:8080")
-    # mlflow.log_metrics(eval_info, step=eval_info["epoch"])
+    reporter = JupyterNotebookReporter(
+        sort_by_metric=True,
+        metric=metric,
+        mode=metric_mode,
+        overwrite=False
+    )
+    reporter.add_metric_column("RetrievalNormalizedDCG")
+    reporter.add_metric_column("RetrievalMAP")
+    reporter.add_metric_column("RetrievalPrecision")
+    reporter.add_metric_column("RetrievalRecall")
 
     experiment_name = f"gps_rec_sys_{generate_now_timestamp_str()}"
     scheduler = ASHAScheduler(
@@ -563,13 +582,18 @@ def hyper_param_search_driver(config: dict[str, Any], graph: Data,
         ),
         param_space=config,
         run_config=tune.RunConfig(
+            name=experiment_name,
+            progress_reporter=reporter,
             # storage_path=root_storage_output_dir,
             callbacks=[
                 MLflowLoggerCallback(
-                    tracking_token=mlflow_tracking_uri,
+                    tracking_uri=mlflow_tracking_uri,
                     experiment_name=experiment_name,
-                    save_artifact=True
-                )
+                    save_artifact=True,
+                    log_params_on_trial_end=True
+                ),
+                JsonLoggerCallback(),
+                CSVLoggerCallback()
             ]
             )
     )
@@ -595,3 +619,15 @@ def hyper_param_search_driver(config: dict[str, Any], graph: Data,
 
     print(f"model testing Failed: {best_result.config = }")
     raise RuntimeError(f"Error: No best model results found {best_result = }")
+
+def align_mpnn_to_node_embedding_size(spec: dict) -> list[int]:
+    mlp_num_layers = random.randint(1, 4)
+    node_embedding_size: int = spec["channels"]
+    mlp_channels_per_layer: list[int] = [node_embedding_size]
+
+    while len(mlp_channels_per_layer) < mlp_num_layers:
+        mlp_channels_per_layer.append(random.choice([64, 128, 256, 512]))
+
+    # mlp_channels_per_layer[mlp_num_layers - 1] = node_embedding_size
+    mlp_channels_per_layer.append(node_embedding_size)
+    return mlp_channels_per_layer

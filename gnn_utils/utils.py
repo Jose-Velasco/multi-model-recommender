@@ -1,4 +1,5 @@
 from pathlib import Path
+import numpy as np
 import torch
 from torch_geometric.utils import degree, contains_self_loops
 from networkx import Graph
@@ -250,6 +251,21 @@ def drop_zero_columns(tensor: torch.Tensor, verbose: bool = True) -> torch.Tenso
         print(f"[drop_zero_columns] Kept {kept} / {mask.numel()} columns; dropped {dropped}.")
 
     return filtered
+
+def normalize_metrics_dict(d: dict) -> dict:
+    out = {}
+    for k, v in d.items():
+        if torch.is_tensor(v):
+            v = v.detach().cpu()
+            if v.numel() == 1:
+                out[k] = v.item()         # scalar
+            else:
+                out[k] = v.tolist()       # small vector
+        elif isinstance(v, (np.floating, np.integer)):
+            out[k] = v.item()
+        else:
+            out[k] = v
+    return out
 
 def metrics_tracker_factory(top_k: int, aggregation: Literal['mean', 'median', 'min', 'max']) -> MetricCollection:
     metricCollection = MetricCollection([

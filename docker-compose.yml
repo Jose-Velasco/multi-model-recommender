@@ -8,7 +8,7 @@ services:
         - RAY_memory_monitor_refresh_ms=0  # avoids false OOM warnings
         - NX_CUGRAPH_AUTOCONFIG=True       # enables NX_CUGRAPH backend for networkx (speeds up algroithms)
         # - NETWORKX_BACKEND_PRIORITY=cugraph  # prioritizes NX_CUGRAPH
-      shm_size: "8g"    # helpful for PyTorch/ORT buffers
+      shm_size: 8gb    # helpful for PyTorch/ORT buffers
       gpus: all
       restart: unless-stopped
       volumes:

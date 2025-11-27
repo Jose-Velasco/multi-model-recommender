@@ -6,7 +6,8 @@ from gnn_utils.datasets import PositiveIterationGraph
 from gnn_utils.utils import drop_zero_columns, get_save_allowed_items_per_user, graph_info, log1p_standardize, normalize_zscore
 from gnn_utils.ray_utils import (
     get_single_dataset_loader, generate_dataset_loaders, GPSConfig, GINEConfig,
-    EdgeMLPClassifierConfig, BaseConfig, LearningRateSchedulerConfigs, gps_model_factory
+    EdgeMLPClassifierConfig, BaseConfig, LearningRateSchedulerConfigs, gps_model_factory,
+    hyper_param_search_driver, align_mpnn_to_node_embedding_size
     )
 from gnn_utils.models import GPS
 import torch
@@ -28,7 +29,25 @@ SAVE_ALLOWED_ITEMS_PER_USER = f"{GRAPH_DATA_DIR}/allowed_items_per_user.pt"
 # SAVE_MODEL_PATH = f"{GRAPH_DATA_DIR}/best_model_checkpoint.pt"
 RNG_SEED = 101
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 MLFLOW_URI = "http://localhost:8080"
+NUM_SAMPLES = 1
+MAX_NUM_EPOCH = 2
+GRACE_PERIOD = 1
+REDUCTION_FACTOR = 2
+CPU_PER_TRIAL = 4
+GPUS_PER_TRIAL = 0.5
+METRIC = "RetrievalNormalizedDCG"
+METRIC_MODE = "max"
+METRIC_SCOPE = "avg"
+DISJOINT_TRAIN_RATIO = 0.4
+NUM_VAL = 0.1
+NUM_TEST = 0.1
+
+
+IS_UNDIRECTED = True # do not change this value
+ADD_NEGATIVE_TRAIN_SAMPLES = False # do not change this value
+
 # %%
 torch.manual_seed(RNG_SEED)
 np.random.seed(RNG_SEED)
@@ -92,43 +111,43 @@ allowed_items_per_user = get_save_allowed_items_per_user(
     item_node_id_map=item_node_id_map)
 # %%
 dataset_split_transform = RandomLinkSplit(
-    num_val=0.1,
-    num_test=0.1,
-    is_undirected=True,
-    add_negative_train_samples=False,
-    disjoint_train_ratio=0.4
+    num_val=NUM_VAL,
+    num_test=NUM_TEST,
+    is_undirected=IS_UNDIRECTED,
+    add_negative_train_samples=ADD_NEGATIVE_TRAIN_SAMPLES,
+    disjoint_train_ratio=DISJOINT_TRAIN_RATIO
 )
 train_data, val_data, test_data = cast(tuple[Data, Data, Data], dataset_split_transform(graph))
 # %%
-test_loader = get_single_dataset_loader(
-    graph=test_data,
-    is_evaluating=False,
-    allowed_items_per_user=None,
-    item_node_ids=[item_node_id for item_node_id in item_node_id_map.values()],
-    batch_size=64,
-    neg_sampling_ratio=3.0,
-    evaluation_num_negative=13,
-    num_neighbors=[2,2,2],
-    num_workers=2,
-    pin_memory=True
-)
+# test_loader = get_single_dataset_loader(
+#     graph=test_data,
+#     is_evaluating=False,
+#     allowed_items_per_user=None,
+#     item_node_ids=[item_node_id for item_node_id in item_node_id_map.values()],
+#     batch_size=64,
+#     neg_sampling_ratio=3.0,
+#     evaluation_num_negative=13,
+#     num_neighbors=[2,2,2],
+#     num_workers=2,
+#     pin_memory=True
+# )
 # %%
-train_loader, val_loader, test_loader = generate_dataset_loaders(
-    graph=graph,
-    allowed_items_per_user=allowed_items_per_user,
-    item_node_ids=[item_node_id for item_node_id in item_node_id_map.values()],
-    val_data_size = 0.1,
-    test_data_size = 0.1,
-    train_batch_size = 128,
-    evaluation_batch_size= 512,
-    is_undirected = True,
-    disjoint_train_ratio = 0.4,
-    neg_sampling_ratio = 3.0,
-    evaluation_num_negative=50,
-    num_neighbors = [5, 5, 5],
-    num_workers = 3,
-    pin_memory = True
-)
+# train_loader, val_loader, test_loader = generate_dataset_loaders(
+#     graph=graph,
+#     allowed_items_per_user=allowed_items_per_user,
+#     item_node_ids=[item_node_id for item_node_id in item_node_id_map.values()],
+#     val_data_size = 0.1,
+#     test_data_size = 0.1,
+#     train_batch_size = 128,
+#     evaluation_batch_size= 512,
+#     is_undirected = True,
+#     disjoint_train_ratio = 0.4,
+#     neg_sampling_ratio = 3.0,
+#     evaluation_num_negative=50,
+#     num_neighbors = [5, 5, 5],
+#     num_workers = 3,
+#     pin_memory = True
+# )
 # %%
 
 # lr_scheduler_config = LearningRateSchedulerConfigs(
@@ -179,11 +198,13 @@ base_config_ray = {
     "learning_rate_scheduler_configs": lr_scheduler_config_ray,
     "val_data_size": 0.1,
     "test_data_size": 0.1,
-    "is_undirected": True,
-    "disjoint_train_ratio": tune.choice([0.3, 0.4, 0.5, 0.6]),
+    "is_undirected": IS_UNDIRECTED,
+    # "disjoint_train_ratio": tune.choice([0.3, 0.4, 0.5, 0.6]),
+    "disjoint_train_ratio": DISJOINT_TRAIN_RATIO,
     "neg_sampling_ratio": tune.choice([2, 3, 4, 5, 6]),
-    "evaluation_num_negative": tune.choice([25, 50, 75, 100]),
-    "num_neighbors":tune.choice([tune.sample_from(lambda config: [tune.qrandint(lower=5, upper=15, q=1).sample() for num_nodes_to_sample in range(config["num_layers"])])]),
+    "evaluation_num_negative": tune.choice([50, 75, 100]),
+    # "num_neighbors":tune.choice([tune.sample_from(lambda config: [tune.qrandint(lower=3, upper=9, q=1).sample() for num_nodes_to_sample in range(config["num_layers"])])]),
+    "num_neighbors":tune.choice([tune.sample_from(lambda config: [tune.qrandint(lower=2, upper=3, q=1).sample() for num_nodes_to_sample in range(config["num_layers"])])]),
     "pin_memory": True,
     "non_blocking": True,
     "BPR_loss_lambda": tune.choice([0.1, 0.2, 0.3, 0.4, 0.5]),
@@ -209,14 +230,25 @@ classifier_config_ray = {
 #     dropout=0.4,
 #     edge_dim=graph.num_edge_features
 # )
+# def align_mpnn_to_node_embedding_size(spec: dict) -> list[int]:
+#     mlp_num_layers = random.randint(1, 4)
+#     node_embedding_size: int = spec["channels"]
+#     mlp_channels_per_layer: list[int] = [node_embedding_size]
+
+#     while len(mlp_channels_per_layer) < mlp_num_layers:
+#         mlp_channels_per_layer.append(random.choice([64, 128, 256, 512]))
+
+#     mlp_channels_per_layer[mlp_num_layers - 1] = node_embedding_size
+#     return mlp_channels_per_layer
 
 mpnn_config_ray = {
-    "num_layers": tune.choice([2, 3, 4]),
-    "mlp_channels": tune.sample_from(
-        lambda spec: [
-            random.choice([64, 128, 256, 512]) for _ in range(random.randint(1, 4))
-        ]
-    ),
+    "num_layers": tune.choice([1, 2, 3, 4]),
+    # "mlp_channels": tune.sample_from(
+    #     lambda spec: [
+    #         random.choice([64, 128, 256, 512]) for _ in range(random.randint(1, 4))
+    #     ]
+    # ),
+    "mlp_channels": tune.sample_from(align_mpnn_to_node_embedding_size),
     "dropout": tune.choice([0.1, 0.2, 0.3, 0.4, 0.5]),
     "edge_dim": graph.num_edge_features,
 }
@@ -237,7 +269,8 @@ mpnn_config_ray = {
 # )
 
 gps_model_config_ray = {
-    "channels": tune.choice([128, 256, 512, 1024]),
+    # "channels": tune.choice([128, 256, 512, 1024]),
+    "channels": tune.choice([128]),
     "num_layers": tune.choice([2, 3, 4]),
     "attn_type": "performer",
     "attn_kwargs": tune.sample_from(lambda spec: {'dropout': random.choice([0.1, 0.2, 0.3, 0.4, 0.5])}),
@@ -257,4 +290,31 @@ gps_model_config_ray = {
 #     graph=graph,
 #     model_class=GPS
 # )
+# %%
+best_config = hyper_param_search_driver(
+    config=gps_model_config_ray,
+    graph=graph,
+    train_dataset=train_data,
+    validation_dataset=val_data,
+    test_dataset=test_data,
+    item_node_ids=[item_node_id for item_node_id in item_node_id_map.values()],
+    allowed_items_per_user=allowed_items_per_user,
+    num_samples=NUM_SAMPLES,
+    model_class=GPS,
+    max_num_epochs=MAX_NUM_EPOCH,
+    cpu_per_trial=CPU_PER_TRIAL,
+    gpus_per_trial=GPUS_PER_TRIAL,
+    grace_period=GRACE_PERIOD,
+    reduction_factor=REDUCTION_FACTOR,
+    metric=METRIC,
+    metric_mode=METRIC_MODE,
+    mlflow_tracking_uri=MLFLOW_URI,
+    scope=METRIC_SCOPE,
+)
+
+print(best_config)
 # TODO: test out ray tune on and then send to colab with stronger GPU
+# ray start --head --dashboard-host 127.0.0.1
+# mlflow server --host 127.0.0.1 --port 8080
+
+# %%
