@@ -1,12 +1,12 @@
 import torch
 from torch_geometric.data import Data
-from typing import Optional
+from typing import Any, Optional
 from tqdm.auto import tqdm
 from torchmetrics import MetricCollection
 from torch.optim.lr_scheduler import LRScheduler, ReduceLROnPlateau
+import mlflow
 
-
-from gnn_utils.utils import EarlyStopper
+from gnn_utils.utils import EarlyStopper, normalize_metrics_dict
 
 def build_ranking_candidates_with_allowed_per_user(
     batch,
@@ -534,7 +534,7 @@ def train(model: torch.nn.Module,
           epochs: int,
           device: torch.device,
           non_blocking: bool,
-          metricsTrackers: MetricCollection) -> dict[str, list]:
+          metricsTrackers: MetricCollection):
     """
     Args:
     model: A PyTorch model to be trained and tested.
@@ -560,13 +560,13 @@ def train(model: torch.nn.Module,
               test_acc: [0.3400, 0.2973]}
     """
     # Create empty results dictionary
-    results: dict[str, list] = {metric_key: [] for metric_key in metricsTrackers.keys()} # pyright: ignore[reportAssignmentType]
-    results |= {"train_loss": [],
-               "train_acc": [],
-               "test_loss": [],
-               "test_acc": [],
-               "lr": []
-    }
+    # results: dict[str, list] = {metric_key: [] for metric_key in metricsTrackers.keys()} # pyright: ignore[reportAssignmentType]
+    # results |= {"train_loss": [],
+    #            "train_acc": [],
+    #            "test_loss": [],
+    #            "test_acc": [],
+    #            "lr": []
+    # }
 
     # Make sure model on target device
     model.to(device)
@@ -585,6 +585,14 @@ def train(model: torch.nn.Module,
         # torch.cuda.empty_cache()
         # torch.cuda.synchronize()
 
+        # during evaluation and inference we do apply reg as its used in training the model
+        # to prevent overfitting. Thus, loss during eval/inference evaluation is on pure ranking scores
+        # with no penalties. The way BPRLoss is implemented if we set .lambda_reg to zero it wont apply
+        # reg. if we do not change it to zero then it will apply reg but we are not providing its .forward
+        # method the user embeddings, thus it crashes, so set it to zero then change it back so its applied
+        # during training when we do provide it the user embeddings
+        save_train_lambda: float = loss_fn.lambda_reg # pyright: ignore[reportAssignmentType]
+        loss_fn.lambda_reg = 0.0 # pyright: ignore[reportArgumentType]
         print(f"starting test_step")
         test_loss = test_step(model=model,
             dataloader=test_dataloader,
@@ -593,26 +601,29 @@ def train(model: torch.nn.Module,
             non_blocking=non_blocking,
             metricsTrackers=metricsTrackers,
         )
+        loss_fn.lambda_reg = save_train_lambda # pyright: ignore[reportArgumentType]
 
         print(f"Calculating metics.")
         epoch_additional_metrics_res = metricsTrackers.compute()
         metricsTrackers.reset()
+        results: dict[str, Any] = normalize_metrics_dict(epoch_additional_metrics_res)
         # Print out what's happening
-        print(
-          f"Epoch: {epoch+1} | "
-          f"train_loss: {train_loss:.4f} | "
-          f"test_loss: {test_loss:.4f} | "
-          f"RetrievalNormalizedDCG: {epoch_additional_metrics_res['RetrievalNormalizedDCG']:.4f}| "
-          f"RetrievalPrecision: {epoch_additional_metrics_res['RetrievalPrecision']:.4f}| "
-          f"RetrievalRecall: {epoch_additional_metrics_res['RetrievalRecall']:.4f}| "
-        )
+        # print(
+        #   f"Epoch: {epoch+1} | "
+        #   f"train_loss: {train_loss:.4f} | "
+        #   f"test_loss: {test_loss:.4f} | "
+        #   f"RetrievalNormalizedDCG: {epoch_additional_metrics_res['RetrievalNormalizedDCG']:.4f}| "
+        #   f"RetrievalPrecision: {epoch_additional_metrics_res['RetrievalPrecision']:.4f}| "
+        #   f"RetrievalRecall: {epoch_additional_metrics_res['RetrievalRecall']:.4f}| "
+        # )
 
         # Update results dictionary
-        results["train_loss"].append(train_loss)
-        results["test_loss"].append(test_loss)
-        results["lr"].append(optimizer.param_groups[0]["lr"])
-        for metric_key, metric_result in epoch_additional_metrics_res.items():
-          results[metric_key].append(metric_result)
+        results["train_loss"] = train_loss
+        results["val_loss"] = test_loss
+        results["lr"] = optimizer.param_groups[0]["lr"]
+        # for metric_key, metric_result in epoch_additional_metrics_res.items():
+        #   results[metric_key].append(metric_result)
+        mlflow.log_metrics(results, step=epoch)
 
         if isinstance(learning_rate_scheduler, ReduceLROnPlateau):
             learning_rate_scheduler.step(epoch_additional_metrics_res['RetrievalNormalizedDCG'])
@@ -624,5 +635,4 @@ def train(model: torch.nn.Module,
             print(f"Early stopping at epoch {epoch+1}. Best validation loss: {early_stopper.best:.4f}")
             break
 
-    # Return the filled results at the end of the epochs
-    return results
+    return model

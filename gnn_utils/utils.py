@@ -277,6 +277,7 @@ def metrics_tracker_factory(top_k: int, aggregation: Literal['mean', 'median', '
     ])
 
     return metricCollection
+
 def generate_now_timestamp_str(time_zone_info: datetime.tzinfo | None = tz.gettz('America/Los_Angeles')) -> str:
     # get the current time and set it up into a readable string for the file paths
     current_time = datetime.datetime.now(time_zone_info)

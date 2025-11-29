@@ -17,6 +17,7 @@ from torch.nn import (
     Dropout
 )
 from collections import defaultdict
+from tqdm.auto import tqdm
 
 class EdgeMLPClassifier(torch.nn.Module):
     def __init__(self, input_channels: int, hidden_channels: int, dropout=0.3):
@@ -141,16 +142,18 @@ class GPS(torch.nn.Module):
     
     @torch.inference_mode()
     # def recommend_all(self, x, edge_index, edge_attr, pe: torch.Tensor, src_index: list[int], dst_index: torch.Tensor, k: int, sorted: bool = True) -> defaultdict[int, list[int]]:
-    def recommend_all(self, x, edge_index, edge_attr, pe: torch.Tensor, src_index: list[int], allowed_items_per_user: dict[int, torch.Tensor], k: int, sorted: bool = True) -> defaultdict[int, list[int]]:
+    def recommend_all(self, x, edge_index, edge_attr, pe: torch.Tensor, src_index: list[int], allowed_items_per_user: dict[int, torch.Tensor], k: int, sorted: bool = True, verbose: bool = True) -> defaultdict[int, list[int]]:
         # x = torch.cat([self.node_emb.weight, pe], dim=1)
         x = torch.cat([x, self.node_emb.weight, pe], dim=1)
-        for conv in self.convs:
+        conv_iter = tqdm(self.convs) if verbose else self.convs
+        for conv in conv_iter:
             x = conv(x, edge_index, edge_attr=edge_attr)
             x = F.dropout(x, self.dropout_prob, training=self.training)
         
         # x must be in order global node id [0, 1, 2, ..., n] as a nodes respective embeddings will be concatenated 
         recommendations: defaultdict[int, list[int]] = defaultdict(list)
-        for user_id in src_index:
+        user_iter = tqdm(src_index) if verbose else src_index
+        for user_id in user_iter:
             out_src = x[user_id] # shape = [128] = feature dim
             # one user node for each item node and have them have the same feature dim
             # out_src = out_src.expand((len(dst_index), len(out_src)))

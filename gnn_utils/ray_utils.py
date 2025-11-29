@@ -24,7 +24,9 @@ from torch_geometric.loader import LinkNeighborLoader
 from torch_geometric.nn.models.lightgcn import BPRLoss
 from ray.air.integrations.mlflow import MLflowLoggerCallback
 from ray.tune.logger import JsonLoggerCallback, CSVLoggerCallback
-from ray.tune import JupyterNotebookReporter
+from ray.tune import JupyterNotebookReporter, CLIReporter
+from ray.tune.progress_reporter import TuneReporterBase
+from ray.widgets.util import in_notebook
 
 @dataclass
 class LearningRateSchedulerConfigs:
@@ -181,6 +183,27 @@ def get_single_dataset_loader(graph: Data, is_evaluating: bool, allowed_items_pe
         pin_memory=pin_memory
     )
     return data_loader
+
+def _add_recommender_metrics_to_ray_hyper_param_search(metric: str, metric_mode: str) -> TuneReporterBase:
+    if in_notebook():
+        reporter = JupyterNotebookReporter(
+            sort_by_metric=True,
+            metric=metric,
+            mode=metric_mode,
+        )
+    else:
+        reporter = CLIReporter(
+            sort_by_metric=True,
+            metric=metric,
+            mode=metric_mode,
+        )
+
+    reporter.add_metric_column("RetrievalMAP")
+    reporter.add_metric_column("RetrievalNormalizedDCG")
+    reporter.add_metric_column("RetrievalPrecision")
+    reporter.add_metric_column("RetrievalRecall")
+    return reporter
+
 
 def generate_dataset_loaders(graph, allowed_items_per_user: dict[int, torch.Tensor], item_node_ids: list[int],
                              val_data_size = 0.1, test_data_size = 0.1, train_batch_size = 128,
@@ -521,7 +544,7 @@ def test_best_model(
     checkpoint_path = os.path.join(best_result.checkpoint.to_directory(), "checkpoint.pt")
 
     # model_state = torch.load(checkpoint_path, map_location=device)
-    model_state, optimizer_state = torch.load(checkpoint_path, map_location=device)
+    model_state, optimizer_state, epoch = torch.load(checkpoint_path, map_location=device)
     del optimizer_state
     best_trained_model.load_state_dict(model_state)
 
@@ -584,16 +607,7 @@ def hyper_param_search_driver(config: dict[str, Any], graph: Data,
                              max_num_epochs: int = 5, cpu_per_trial: int = 2, gpus_per_trial: float = 0.2,
                              grace_period: int = 1, reduction_factor: int = 2, metric: str = "RetrievalNormalizedDCG", metric_mode: str = "max",
                              mlflow_tracking_uri: str = "http://localhost:8080", scope: Literal["all", "last", "avg", "last-5-avg", "last-10-avg"] = "avg") -> dict[str, Any]:
-    reporter = JupyterNotebookReporter(
-        sort_by_metric=True,
-        metric=metric,
-        mode=metric_mode,
-        overwrite=False
-    )
-    reporter.add_metric_column("RetrievalNormalizedDCG")
-    reporter.add_metric_column("RetrievalMAP")
-    reporter.add_metric_column("RetrievalPrecision")
-    reporter.add_metric_column("RetrievalRecall")
+    reporter = _add_recommender_metrics_to_ray_hyper_param_search(metric, metric_mode)
 
     experiment_name = f"gps_rec_sys_{generate_now_timestamp_str()}"
     scheduler = ASHAScheduler(
@@ -650,7 +664,7 @@ def hyper_param_search_driver(config: dict[str, Any], graph: Data,
     best_result = results.get_best_result(metric, metric_mode, scope=scope)
 
     print(f"Best trial config: {best_result.config}")
-    print(f"Best trial final validation loss: {best_result.metrics['val_loss'] if best_result.metrics and 'val_loss' in best_result.metrics else 'error'}")
+    print(f"Best trial final validation loss: {best_result.metrics['test_loss'] if best_result.metrics and 'test_loss' in best_result.metrics else 'error'}")
     print(f"Best trial final RetrievalNormalizedDCG: {best_result.metrics['RetrievalNormalizedDCG'] if best_result.metrics and 'RetrievalNormalizedDCG' in best_result.metrics else 'error'}")
 
     # Call the test_best_model function asynchronously
@@ -669,7 +683,9 @@ def hyper_param_search_driver(config: dict[str, Any], graph: Data,
     raise RuntimeError(f"Error: No best model results found {best_result = }")
 
 def align_mpnn_to_node_embedding_size(spec: dict) -> list[int]:
-    mlp_num_layers = random.randint(1, 4)
+    # mlp_num_layers = random.randint(1, 4)
+    # each GT layer has one GINE GNN with an MLP thus we need number of num_layers of MLP per GPS layer
+    mlp_num_layers = spec["num_layers"]
     node_embedding_size: int = spec["channels"]
     mlp_channels_per_layer: list[int] = [node_embedding_size]
 

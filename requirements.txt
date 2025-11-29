@@ -2,17 +2,17 @@ numpy
 pandas==2.3.3
 ipykernel==7.1.0
 matplotlib==3.10.7
-mlflow==3.5.1
-ray[tune]==2.51.1
 scikit-learn==1.7.2
 scipy==1.16.3
 seaborn==0.13.2
-torchmetrics==1.8.2
-torch-geometric==2.7.0
 tqdm
 ipywidgets==8.1.8
 tabulate==0.9.0
 networkx==3.5
+mlflow==3.5.1
+torch-geometric==2.7.0
+ray[tune]==2.51.1
+torchmetrics==1.8.2
 # pyg-lib==0.5.0+pt28cu126
 # nx-cugraph-cu12 --extra-index-url https://pypi.nvidia.com
 # torch-scatter

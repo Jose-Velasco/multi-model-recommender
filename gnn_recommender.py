@@ -1,9 +1,10 @@
 # %%
 from gnn_utils.datasets import PositiveIterationGraph
 from torch_geometric.data import Data
+from gnn_utils.ray_utils import BaseConfig, EdgeMLPClassifierConfig, GINEConfig, GPSConfig, LearningRateSchedulerConfigs
 from gnn_utils.train_utils import train
 from gnn_utils.utils import (
-    metrics_tracker_factory, normalize_zscore, log1p_standardize, graph_info,
+    generate_now_timestamp_str, metrics_tracker_factory, normalize_zscore, log1p_standardize, graph_info,
     EarlyStopper, get_save_allowed_items_per_user, drop_zero_columns
 )
 
@@ -30,42 +31,45 @@ from gnn_utils.models import GPS, EdgeMLPClassifier
 from collections import defaultdict
 from functools import partial
 from pathlib import Path
+import mlflow
+from dataclasses import asdict
+import pandas as pd
 
 # %%
 ROOT_DATA_DIR = "./data"
 GRAPH_DATA_DIR = f"{ROOT_DATA_DIR}/graph_data"
 SAVE_ALLOWED_ITEMS_PER_USER = f"{GRAPH_DATA_DIR}/allowed_items_per_user.pt"
 SAVE_MODEL_PATH = f"{GRAPH_DATA_DIR}/best_model_checkpoint.pt"
+MLFLOW_URI = "http://localhost:8080"
 RNG_SEED = 101
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # 40% of edges for supervision and 70% are edges for message passing if set to 0.3
-NUM_VAL = 0.1
-NUM_TEST = 0.1
-DISJOINT_TRAIN_RATIO = 0.4
-NEGATIVE_SAMPLE_RATIO = 3
-EVALUATION_NUM_NEGATIVE = 50
-NUM_NEIGHBORS = [2, 2, 2]
-NUM_WORKERS = 6
+# NUM_VAL = 0.1
+# NUM_TEST = 0.1
+# DISJOINT_TRAIN_RATIO = 0.4
+# NEGATIVE_SAMPLE_RATIO = 3
+# EVALUATION_NUM_NEGATIVE = 100
+# NUM_NEIGHBORS = [10, 5, 3]
+# NUM_WORKERS = 6
 # (PIN_MEMORY, NON_BLOCKING) should increase training performance with GPU as long as dataset fits in memory(ram memory)
-PIN_MEMORY = True
-NON_BLOCKING = True
+# PIN_MEMORY = True
+# NON_BLOCKING = True
 
-NUM_EPOCHS: int = 2
-# BATCH_SIZE: int = 1024
-TRAIN_BATCH_SIZE: int = 128
-EVALUATION_BATCH_SIZE: int = 512
-OPTIMIZER_LEARNING_RATE: float = 0.001
-WEIGHT_DECAY: float = 0.01
+# NUM_EPOCHS: int = 15
+# TRAIN_BATCH_SIZE: int = 256
+# EVALUATION_BATCH_SIZE: int = 1024
+# OPTIMIZER_LEARNING_RATE: float = 0.001
+# WEIGHT_DECAY: float = 0.01
+# BPR_LAMBDA_REG = 0.5
 
 GNN_HIDDEN_CHANNELS: int = 128
-NUM_LAYERS: int = 2
-CLASSIFIER_HIDDEN_CHANNELS: int = 1024
-DROPOUT: float = 0.4
-# PE_OUT_DIM = 16
-ATTN_KWARGS = {'dropout': DROPOUT}
-ATTENTIONS_HEADS = 4
-GINE_MLP_CHANNEL_LIST = [GNN_HIDDEN_CHANNELS, 2 * GNN_HIDDEN_CHANNELS, GNN_HIDDEN_CHANNELS]
+NUM_LAYERS: int = 3
+# CLASSIFIER_HIDDEN_CHANNELS: int = 4096
+# DROPOUT: float = 0.4
+# ATTN_KWARGS = {'dropout': DROPOUT}
+# ATTENTIONS_HEADS = 4
+# GINE_MLP_CHANNEL_LIST = [GNN_HIDDEN_CHANNELS, 256, 256, 256, GNN_HIDDEN_CHANNELS]
 
 TOP_K = 20
 METRIC_AGGREGATION = "mean"
@@ -123,13 +127,72 @@ print(f"Number of item nodes: {len(item_node_id_map)}")
 
 users_node_id_map: dict[int, int] = graph.users_node_id_map # pyright: ignore[reportAttributeAccessIssue]
 del graph.users_node_id_map # pyright: ignore[reportAttributeAccessIssue]
+
+# %%
+lr_scheduler_config = LearningRateSchedulerConfigs(
+    mode="max",
+    factor=0.5,
+    patience=3,
+    min_lr=0.00001
+)
+
+base_config = BaseConfig(
+    max_epoch=16,
+    device="cuda",
+    num_workers=6,
+    train_batch_size=256,
+    evaluation_batch_size=1024,
+    optimizer_learning_rate=0.001,
+    weight_decay=0.01,
+    learning_rate_scheduler_configs=lr_scheduler_config,
+    val_data_size=0.1,
+    test_data_size=0.1,
+    is_undirected=True,
+    disjoint_train_ratio=0.4,
+    neg_sampling_ratio=3,
+    evaluation_num_negative=100,
+    num_neighbors=[10, 5, 3],
+    pin_memory=True,
+    non_blocking=True,
+    BPR_loss_lambda=0.5,
+    metrics_top_k=20,
+    metrics_aggregation="mean"
+)
+
+classifier_config = EdgeMLPClassifierConfig(
+    input_channels=GNN_HIDDEN_CHANNELS,
+    hidden_channels=4096,
+    dropout=0.4
+)
+
+mpnn_config = GINEConfig(
+    num_layers=NUM_LAYERS,
+    mlp_channels=[GNN_HIDDEN_CHANNELS, 128, 128, GNN_HIDDEN_CHANNELS],
+    dropout=0.4,
+    edge_dim=graph.num_edge_features
+)
+
+gps_model_config = GPSConfig(
+   channels=GNN_HIDDEN_CHANNELS,
+   num_layers=NUM_LAYERS,
+   attn_type="performer",
+   attn_kwargs={'dropout': 0.4},
+   attentions_heads=4,
+   mpnn=mpnn_config,
+   classifier=classifier_config,
+   num_of_nodes=graph.num_nodes, # pyright: ignore[reportArgumentType]
+   num_initial_node_features=graph.num_node_features,
+   dropout_prob=0.4,
+   act_func="gelu",
+   training_configs=base_config
+)
 # %%
 dataset_split_transform = RandomLinkSplit(
-    num_val=NUM_VAL,
-    num_test=NUM_TEST,
+    num_val=base_config.val_data_size,
+    num_test=base_config.test_data_size,
     is_undirected=True,
     add_negative_train_samples=False,
-    disjoint_train_ratio=DISJOINT_TRAIN_RATIO
+    disjoint_train_ratio=base_config.disjoint_train_ratio
 )
 train_data, val_data, test_data = cast(tuple[Data, Data, Data], dataset_split_transform(graph))
 
@@ -166,18 +229,18 @@ test_data = eval_supervision_edge_keep_transform(test_data)
 
 negative_sampler = NegativeSampling(
     mode="triplet",
-    amount=NEGATIVE_SAMPLE_RATIO
+    amount=base_config.neg_sampling_ratio
 )
 
 val_transform = BuildRankingCandidatesTransform(
     allowed_items_per_user=allowed_items_per_user,  # dict[int, Tensor of global item ids]
-    num_neg_eval=EVALUATION_NUM_NEGATIVE,
+    num_neg_eval=base_config.evaluation_num_negative,
     item_type=eval_supervision_edge_keep_transform.item_type,                 # whatever code you use for item nodes
     allow_batch_fallback=True,
 )
 test_transform = BuildRankingCandidatesTransform(
     allowed_items_per_user=allowed_items_per_user,  # dict[int, Tensor of global item ids]
-    num_neg_eval=EVALUATION_NUM_NEGATIVE,
+    num_neg_eval=base_config.evaluation_num_negative,
     item_type=eval_supervision_edge_keep_transform.item_type,                 # whatever code you use for item nodes
     allow_batch_fallback=True,
 )
@@ -197,40 +260,40 @@ so basically these are the supervision edges or samples we are computing loss to
 
 train_loader = LinkNeighborLoader(
     data=train_data,
-    num_neighbors=NUM_NEIGHBORS,
+    num_neighbors=base_config.num_neighbors,
     edge_label_index=train_data.edge_label_index, # user→item supervision edges
-    batch_size=TRAIN_BATCH_SIZE,
+    batch_size=base_config.train_batch_size,
     neg_sampling=negative_sampler,
     edge_label=None,
     shuffle=True,
-    num_workers=NUM_WORKERS,
-    pin_memory=PIN_MEMORY
+    num_workers=base_config.num_workers,
+    pin_memory=base_config.pin_memory
 )
 
 val_loader = LinkNeighborLoader(
     data=val_data,
-    num_neighbors=NUM_NEIGHBORS,
+    num_neighbors=base_config.num_neighbors,
     edge_label_index=val_data.edge_label_index, # user→item supervision edges
-    batch_size=EVALUATION_BATCH_SIZE,
+    batch_size=base_config.evaluation_batch_size,
     neg_sampling=None, # no sampler-based negatives in eval
     transform=val_transform, # attaches candidate negative items and targets
     edge_label=None,
     shuffle=False,
-    num_workers=NUM_WORKERS,
-    pin_memory=PIN_MEMORY
+    num_workers=base_config.num_workers,
+    pin_memory=base_config.pin_memory
 )
 
 test_loader = LinkNeighborLoader(
     data=test_data,
-    num_neighbors=NUM_NEIGHBORS,
+    num_neighbors=base_config.num_neighbors,
     edge_label_index=test_data.edge_label_index, # user→item supervision edges
-    batch_size=EVALUATION_BATCH_SIZE,
+    batch_size=base_config.evaluation_batch_size,
     edge_label=None,
     neg_sampling=None, # no sampler-based negatives in eval
     transform=test_transform, # attaches candidate negative items and targets
     shuffle=False,
-    num_workers=NUM_WORKERS,
-    pin_memory=PIN_MEMORY
+    num_workers=base_config.num_workers,
+    pin_memory=base_config.pin_memory
 )
 
 # eval_negative_sampler = partial(sample_negatives, num_neg=EVALUATION_NUM_NEGATIVE, all_items=all_items, user_seen_items=user_seen_items)
@@ -242,37 +305,39 @@ test_loader = LinkNeighborLoader(
 # RetrievalNormalizedDCG(k=20) ← use this to pick best model
 # %%
 classifier = EdgeMLPClassifier(
-    input_channels=GNN_HIDDEN_CHANNELS,
-    hidden_channels=CLASSIFIER_HIDDEN_CHANNELS,
-    dropout=DROPOUT
+    input_channels=gps_model_config.channels,
+    # hidden_channels=CLASSIFIER_HIDDEN_CHANNELS,
+    hidden_channels=classifier_config.hidden_channels,
+    dropout=classifier_config.dropout
 )
 pe_parameters: list[tuple[str, int]] = [
     ("random_walk_pe", graph.random_walk_pe.shape[1]), # pyright: ignore[reportAttributeAccessIssue]
     ("laplacian_eigenvector_pe", graph.laplacian_eigenvector_pe.shape[1]) # pyright: ignore[reportAttributeAccessIssue]
 ]
 mess_pass_nn: list[MessagePassing] = []
-for _ in range(NUM_LAYERS):
+for _ in range(gps_model_config.num_layers):
     nn = MLP(
-        channel_list=GINE_MLP_CHANNEL_LIST,
-        dropout=DROPOUT,
+        channel_list=mpnn_config.mlp_channels,
+        dropout=mpnn_config.dropout,
     )
     mess_pass_nn.append(GINEConv(nn=nn, edge_dim=graph.num_edge_features))
 
 model = GPS(
-    channels=GNN_HIDDEN_CHANNELS,
+    channels=gps_model_config.channels,
     pe_parameters=pe_parameters,
-    num_layers=NUM_LAYERS,
-    attn_type="performer",
-    attn_kwargs=ATTN_KWARGS,
-    attentions_heads=ATTENTIONS_HEADS,
+    num_layers=gps_model_config.num_layers,
+    attn_type=gps_model_config.attn_type,
+    attn_kwargs=gps_model_config.attn_kwargs,
+    attentions_heads=gps_model_config.attentions_heads,
     mpnn=mess_pass_nn,
     classifier=classifier,
     num_of_nodes=graph.num_nodes, # type: ignore
     num_initial_node_features=graph.num_node_features,
-    dropout_prob=DROPOUT,
-    act_func="gelu"
+    dropout_prob=gps_model_config.dropout_prob,
+    act_func=gps_model_config.act_func
 ).to(DEVICE)
 
+# %%
 test_batch = next(iter(train_loader)).to(DEVICE)
 print(summary(
     model=model,
@@ -281,42 +346,48 @@ print(summary(
     edge_attr=test_batch.edge_attr,
     batch=test_batch))
 # %%
-optimizer = torch.optim.AdamW(model.parameters(), lr=OPTIMIZER_LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+optimizer = torch.optim.AdamW(model.parameters(), lr=base_config.optimizer_learning_rate, weight_decay=base_config.weight_decay)
 scheduler = ReduceLROnPlateau(
     optimizer,
-    mode='max',
-    factor=0.5,
-    patience=3,
-    min_lr=0.00001
+    mode=lr_scheduler_config.mode,
+    factor=lr_scheduler_config.factor,
+    patience=lr_scheduler_config.patience,
+    min_lr=lr_scheduler_config.min_lr
 )
-criterion = BPRLoss()
-early_stopper = EarlyStopper(patience=3, mode="max")
+criterion = BPRLoss(lambda_reg=base_config.BPR_loss_lambda)
+early_stopper = EarlyStopper(patience=4, mode="max")
 metrics = metrics_tracker_factory(top_k=TOP_K, aggregation=METRIC_AGGREGATION).to(DEVICE)
 # %%
-train(
-    model=model,
-    train_dataloader=train_loader,
-    test_dataloader=val_loader,
-    optimizer=optimizer,
-    loss_fn=criterion,
-    learning_rate_scheduler=scheduler,
-    early_stopper=early_stopper,
-    epochs=NUM_EPOCHS,
-    device=DEVICE,
-    non_blocking=NON_BLOCKING,
-    metricsTrackers=metrics
-)
-# # %%
-# if Path(SAVE_MODEL_PATH).exists():
-#     overwrite = input(f"Warning: saved mode found at {SAVE_MODEL_PATH} overwrite? (enter Y for yes else enter anything)")
-#     if overwrite == "Y":
-#         print("saving best found model state_dict")
-#         early_stopper.load_best(model=model)
-#         torch.save(model.state_dict(), SAVE_MODEL_PATH)    
-# else:
-#     print("saving best found model state_dict")
-#     early_stopper.load_best(model=model)
-#     torch.save(model.state_dict(), SAVE_MODEL_PATH)
+mlflow.set_tracking_uri(MLFLOW_URI)
+experiment_name = f"final_model_{generate_now_timestamp_str()}"
+experiment = mlflow.set_experiment(experiment_name)
+
+with mlflow.start_run(experiment_id=experiment.experiment_id):
+    mlflow.log_params(asdict(gps_model_config))
+    train(
+        model=model,
+        train_dataloader=train_loader,
+        test_dataloader=val_loader,
+        optimizer=optimizer,
+        loss_fn=criterion,
+        learning_rate_scheduler=scheduler,
+        early_stopper=early_stopper,
+        epochs=base_config.max_epoch,
+        device=DEVICE,
+        non_blocking=base_config.non_blocking,
+        metricsTrackers=metrics
+    )
+# %%
+if Path(SAVE_MODEL_PATH).exists():
+    overwrite = input(f"Warning: saved mode found at {SAVE_MODEL_PATH} overwrite? (enter Y for yes else enter anything)")
+    if overwrite == "Y":
+        print("saving best found model state_dict")
+        early_stopper.load_best(model=model)
+        torch.save(model.state_dict(), SAVE_MODEL_PATH)    
+else:
+    print("saving best found model state_dict")
+    early_stopper.load_best(model=model)
+    torch.save(model.state_dict(), SAVE_MODEL_PATH)
 
 # %%
 # ckpt = torch.load(SAVE_MODEL_PATH)
@@ -349,9 +420,12 @@ all_recommendations = model.recommend_all(
 # a non-user key
 all_recommendations.default_factory = None
 # %%
+import pandas as pd
+def export_all_recommendations(all_recommendations: dict[int, list[int]], path: str) -> None:
+    output = pd.DataFrame(all_recommendations)
+    output.sort_index(inplace=True)
+    output.to_csv(path, sep='\t', index=False, header=False)
 
+export_all_recommendations(all_recommendations, path=f"{GRAPH_DATA_DIR}/all_recs_{generate_now_timestamp_str}.txt")
 # %%
-# TODO: get test func working with eval_negative_sampler
-#       test training func then test and overall train
-#       use NDCG@20 for LR scheduler and earlystopping once working move to
-#       ray tune
+# mlflow server --host 127.0.0.1 --port 8080

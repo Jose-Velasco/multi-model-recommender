@@ -31,12 +31,12 @@ RNG_SEED = 101
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 MLFLOW_URI = "http://localhost:8080"
-NUM_SAMPLES = 1
-MAX_NUM_EPOCH = 2
+NUM_SAMPLES = 6
+MAX_NUM_EPOCH = 15
 GRACE_PERIOD = 1
 REDUCTION_FACTOR = 2
-CPU_PER_TRIAL = 4
-GPUS_PER_TRIAL = 0.5
+CPU_PER_TRIAL = 8
+GPUS_PER_TRIAL = 1.0
 METRIC = "RetrievalNormalizedDCG"
 METRIC_MODE = "max"
 METRIC_SCOPE = "avg"
@@ -188,11 +188,12 @@ lr_scheduler_config_ray = {
 # )
 
 base_config_ray = {
-    "max_epoch": 20,
+    "max_epoch": MAX_NUM_EPOCH,
     "device": "cuda",
-    "num_workers": 2,
+    "num_workers": 4,
     "train_batch_size": tune.choice([128, 256, 512, 1024]),
-    "evaluation_batch_size": tune.choice([512, 1024, 1048]),
+    # "evaluation_batch_size": tune.choice([512, 1024]),
+    "evaluation_batch_size": 1024,
     "optimizer_learning_rate": tune.choice([0.01, 0.001, 0.0001]),
     "weight_decay": tune.choice([0.01, 0.001, 0.0001, 0.00001]),
     "learning_rate_scheduler_configs": lr_scheduler_config_ray,
@@ -201,10 +202,10 @@ base_config_ray = {
     "is_undirected": IS_UNDIRECTED,
     # "disjoint_train_ratio": tune.choice([0.3, 0.4, 0.5, 0.6]),
     "disjoint_train_ratio": DISJOINT_TRAIN_RATIO,
-    "neg_sampling_ratio": tune.choice([2, 3, 4, 5, 6]),
-    "evaluation_num_negative": tune.choice([50, 75, 100]),
+    "neg_sampling_ratio": tune.choice([2, 3, 4, 5]),
+    "evaluation_num_negative": tune.choice([50, 75]),
     # "num_neighbors":tune.choice([tune.sample_from(lambda config: [tune.qrandint(lower=3, upper=9, q=1).sample() for num_nodes_to_sample in range(config["num_layers"])])]),
-    "num_neighbors":tune.choice([tune.sample_from(lambda config: [tune.qrandint(lower=2, upper=3, q=1).sample() for num_nodes_to_sample in range(config["num_layers"])])]),
+    "num_neighbors":tune.choice([tune.sample_from(lambda config: [tune.qrandint(lower=3, upper=10, q=1).sample() for num_nodes_to_sample in range(config["num_layers"])])]),
     "pin_memory": True,
     "non_blocking": True,
     "BPR_loss_lambda": tune.choice([0.1, 0.2, 0.3, 0.4, 0.5]),
@@ -269,12 +270,12 @@ mpnn_config_ray = {
 # )
 
 gps_model_config_ray = {
-    # "channels": tune.choice([128, 256, 512, 1024]),
-    "channels": tune.choice([128]),
-    "num_layers": tune.choice([2, 3, 4]),
+    "channels": tune.choice([128, 256, 512]),
+    # "channels": tune.choice([128]),
+    "num_layers": tune.choice([1, 2, 3, 4]),
     "attn_type": "performer",
     "attn_kwargs": tune.sample_from(lambda spec: {'dropout': random.choice([0.1, 0.2, 0.3, 0.4, 0.5])}),
-    "attentions_heads": tune.choice([2, 4, 8]),
+    "attentions_heads": tune.choice([2, 4]),
     "mpnn": mpnn_config_ray,
     "classifier": classifier_config_ray,
     "num_of_nodes": graph.num_nodes,
