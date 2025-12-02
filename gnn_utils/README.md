@@ -1,10 +1,10 @@
-1. Dataset Generation
+## 1. Dataset Generation
 
 File: generate_graph_dataset.ipynb
 
 This notebook creates the graph-based dataset used for GraphGPS.
 
-2. Hyperparameter Search (GraphGPS)
+## 2. Hyperparameter Search (GraphGPS)
 File: gnn_hyperparam_search.py
 
 This script performs a Ray Tune hyperparameter search and logs all runs to MLflow.
@@ -20,7 +20,7 @@ Run the hyperparameter search: python gnn_hyperparam_search.py
 
 View MLflow experiment dashboard Open: http://127.0.0.1:8080
 
-3. Train the Final GraphGPS Model
+## 3. Train the Final GraphGPS Model
 File: gnn_recommender.py
 
 Use this script with the best hyperparameters to train the final model, based on the best Ray Tune run.
