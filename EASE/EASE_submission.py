@@ -1,3 +1,11 @@
+
+"""
+Adapted from the EASE model by Harald Steck (WWW 2019) and
+the TorchEASE open-source implementation (Jay Franck, GitHub).https://github.com/franckjay/TorchEASE/blob/main/src/main/EASE.py
+
+Extensions in this file (preprocessing, NDCG@20 evaluation) were designed by the authors with drafting assistance from OpenAI's ChatGPT (GPT-5.1 Thinking), and then reviewed, modified, and tested by the authors.
+"""
+
 import sys
 import logging
 from typing import Optional, Dict, List, Tuple

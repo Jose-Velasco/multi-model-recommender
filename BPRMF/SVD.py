@@ -12,6 +12,7 @@ to estimate a reasonable range of n_factors for MF / BPRMF.
     ./images/svd_singular_values.png
     ./images/svd_cumulative_energy.png
 """
+# Portions of this file (initial skeleton and some functions) were generated with assistance from OpenAI's ChatGPT (GPT-5.1 Thinking) and then modified and debugged by the authors.
 
 import os
 import sys

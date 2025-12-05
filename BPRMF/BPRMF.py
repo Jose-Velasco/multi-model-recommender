@@ -8,6 +8,7 @@ BPR-MF pipeline on train-1.txt
 - grid search over lambda (L2 reg) with NDCG@20
 - records training loss per epoch for each lambda and plots curves
 """
+# Portions of this file (initial skeleton and some functions) were generated with assistance from OpenAI's ChatGPT (GPT-5.1 Thinking) and then modified and debugged by the authors.
 
 import sys
 import os
