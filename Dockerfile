@@ -20,10 +20,12 @@ RUN pip install --upgrade pip wheel setuptools
 
 # cache pip wheels for requirements
 # COPY requirements.txt /tmp/requirements.txt
-COPY requirements.txt /tmp/
+COPY requirements.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt
+
+# pip install pyg-lib -f https://data.pyg.org/whl/torch-2.8.0+cu126.html
 
 # Application setup
 COPY . /app/app

@@ -1,8 +1,20 @@
+### 📘 Model Guides
+
+Each model in this project includes its own README with installation instructions, training commands, and evaluation details:
+
+| Model      | Guide |
+|------------|--------|
+| EASE       | [EASE/README.md](EASE/README.md) |
+| BPRMF       | [BPRMF/README.md](BPRMF/README.md) |
+| NCF        | [NCF/README.md](NCF/README.md) |
+| LightGCN   | [LightGCN/README.md](LightGCN/README.md) |
+| GraphGPS   | [gnn_utils/README.md](gnn_utils/README.md) |
+
 ## Getting Started
 The **first time** building the dev env will take sometime since a lot of the libraries are large. After the first build, the dev env will
 **spin up fast**.
 
-### Dev Environment: Visual Studio code (vscode) & Docker (Recommended) CUDA 12.6
+### Dev Environment: Visual Studio code (vscode) & Docker (Recommended) **CUDA** 12.6
 
 Install `docker` and `docker-compose` and have the **docker application running** before attempting to run commands with `docker`, `docker-compose`, or spinning up a development environment
 
